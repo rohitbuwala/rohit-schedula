@@ -10,7 +10,7 @@ function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): bool
   try {
     const url = new URL(origin);
     return url.protocol === 'https:' &&
-      /^rohit-schedula-git-[a-z0-9-]+-rohit-buwalas-projects\.vercel\.app$/.test(url.hostname);
+      /^rohit-schedula-(?:git-[a-z0-9-]+-)?[a-z0-9-]+-rohit-buwalas-projects\.vercel\.app$/.test(url.hostname);
   } catch {
     return false;
   }
