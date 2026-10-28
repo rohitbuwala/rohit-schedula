@@ -23,7 +23,7 @@ async function bootstrap() {
     instrument: ObserveInstrument,
   });
   app.enableCors({
-    origin: (origin, callback) => {
+    origin: (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
       if (!origin || isAllowedFrontendOrigin(origin, env.frontendUrl)) {
         callback(null, true);
       } else {
