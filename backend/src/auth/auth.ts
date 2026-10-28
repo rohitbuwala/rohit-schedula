@@ -15,7 +15,7 @@ export function createAuth(database: AuthDatabase) {
     secret: env.betterAuthSecret,
     trustedOrigins: [
       env.frontendUrl,
-      'https://rohit-schedula-git-*-rohit-buwalas-projects.vercel.app',
+      'https://rohit-schedula-*-rohit-buwalas-projects.vercel.app',
     ],
     database,
     emailAndPassword: { enabled: true },
