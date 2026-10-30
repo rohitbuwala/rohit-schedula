@@ -5,7 +5,7 @@ import { registerAuthHandler } from './auth/auth-handler.js';
 import { loadEnv } from './config/env.js';
 
 function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): boolean {
-  if (origin === configuredOrigin) return true;
+  if (origin === configuredOrigin || origin === 'https://rohit-schedula.vercel.app') return true;
 
   try {
     const url = new URL(origin);
