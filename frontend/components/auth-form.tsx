@@ -41,7 +41,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
 
   const signup = mode === "signup";
   return <Card className="w-full max-w-md">
-    <CardHeader><CardTitle>{signup ? "Create your account" : "Welcome back"}</CardTitle><CardDescription>{signup ? "Create a patient account to get started." : "Sign in to your Schedula account."}</CardDescription></CardHeader>
+    <CardHeader><CardTitle>{signup ? "Create your account" : "Welcome back"}</CardTitle><CardDescription>{signup ? "Create a patient account to get started." : "Sign in to your Medrella account."}</CardDescription></CardHeader>
     <CardContent>
       <form onSubmit={submit} noValidate className="space-y-4">
         {signup && <Field id="name" label="Full name" error={fieldErrors.name}><Input id="name" name="name" autoComplete="name" required maxLength={100} aria-invalid={Boolean(fieldErrors.name)} /></Field>}
@@ -51,7 +51,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
         {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
         <Button type="submit" className="w-full" disabled={busy}>{busy ? "Please wait…" : signup ? "Create account" : "Log in"}</Button>
       </form>
-      <p className="mt-6 text-center text-sm text-slate-600">{signup ? "Already have an account? " : "New to Schedula? "}<Link className="font-semibold text-teal-800 hover:underline" href={signup ? "/login" : "/signup"}>{signup ? "Log in" : "Create an account"}</Link></p>
+      <p className="mt-6 text-center text-sm text-slate-600">{signup ? "Already have an account? " : "New to Medrella? "}<Link className="font-semibold text-teal-800 hover:underline" href={signup ? "/login" : "/signup"}>{signup ? "Log in" : "Create an account"}</Link></p>
     </CardContent>
   </Card>;
 }

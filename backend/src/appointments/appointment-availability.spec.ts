@@ -28,4 +28,42 @@ describe('appointment availability', () => {
     expect(isBookableSlot(new Date('2027-01-04T09:00:00Z'), new Date('2027-01-04T09:30:00Z'), now)).toBe(true);
     expect(isBookableSlot(new Date('2027-01-04T09:15:00Z'), new Date('2027-01-04T09:45:00Z'), now)).toBe(false);
   });
+
+  it('respects custom start and end hours', () => {
+    const slots = candidateSlotsForDate('2027-01-04', now, { startHour: 10, endHour: 14 });
+    expect(slots).toHaveLength(8);
+    expect(slots[0]?.startsAt.toISOString()).toBe('2027-01-04T10:00:00.000Z');
+    expect(slots.at(-1)?.endsAt.toISOString()).toBe('2027-01-04T14:00:00.000Z');
+  });
+
+  it('excludes slots falling within configured break hours', () => {
+    const slots = candidateSlotsForDate('2027-01-04', now, {
+      startHour: 9,
+      endHour: 13,
+      breakStart: '11:00',
+      breakEnd: '12:00',
+    });
+    // Hours: 9-10 (2), 10-11 (2), 11-12 (break skipped), 12-13 (2) => total 6 slots
+    expect(slots).toHaveLength(6);
+    expect(slots.some((s) => s.startsAt.toISOString() === '2027-01-04T11:00:00.000Z')).toBe(false);
+    expect(slots.some((s) => s.startsAt.toISOString() === '2027-01-04T11:30:00.000Z')).toBe(false);
+  });
+
+  it('returns 0 slots for leave dates', () => {
+    const slots = candidateSlotsForDate('2027-01-04', now, {
+      leaveDates: ['2027-01-04'],
+    });
+    expect(slots).toHaveLength(0);
+  });
+
+  it('respects custom active days (e.g. enabling Saturday)', () => {
+    // 2027-01-02 is Saturday (dayOfWeek=6)
+    const defaultSlots = candidateSlotsForDate('2027-01-02', now);
+    expect(defaultSlots).toHaveLength(0);
+
+    const saturdaySlots = candidateSlotsForDate('2027-01-02', now, {
+      activeDays: [1, 2, 3, 4, 5, 6],
+    });
+    expect(saturdaySlots.length).toBeGreaterThan(0);
+  });
 });

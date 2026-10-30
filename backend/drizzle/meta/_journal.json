@@ -29,6 +29,13 @@
       "when": 1793104000000,
       "tag": "0003_scheduled_appointment_overlap",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793200000000,
+      "tag": "0004_doctor_profile_extended_fields",
+      "breakpoints": true
     }
   ]
 }

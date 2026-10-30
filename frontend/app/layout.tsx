@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Schedula | Secure Care Access",
-  description: "Sign in to your Schedula healthcare workspace.",
+  title: "Medrella | Modern Healthcare Platform",
+  description: "Medrella healthcare appointment and clinic management platform.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

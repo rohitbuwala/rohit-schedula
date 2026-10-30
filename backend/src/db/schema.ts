@@ -1,4 +1,4 @@
-import { boolean, check, index, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { boolean, check, index, integer, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const userRole = pgEnum('user_role', ['patient', 'doctor', 'admin']);
@@ -60,6 +60,14 @@ export const doctorProfile = pgTable('doctor_profile', {
   licenseRegion: text('license_region').notNull(),
   licenseNumber: text('license_number').notNull(),
   bio: text('bio'),
+  // Extended profile fields
+  phone: text('phone'),
+  qualifications: text('qualifications'),
+  yearsOfExperience: integer('years_of_experience'),
+  consultationFeeInr: integer('consultation_fee_inr'),
+  clinicName: text('clinic_name'),
+  clinicAddress: text('clinic_address'),
+  profilePhotoUrl: text('profile_photo_url'),
   status: doctorProfileStatus('status').notNull().default('pending'),
   submittedAt: timestamp('submitted_at', { withTimezone: true }).notNull().defaultNow(),
   reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
@@ -68,6 +76,8 @@ export const doctorProfile = pgTable('doctor_profile', {
   uniqueIndex('doctor_profile_license_unique').on(table.licenseRegion, table.licenseNumber),
   index('doctor_profile_status_submitted_idx').on(table.status, table.submittedAt),
   check('doctor_profile_review_state_check', sql`(${table.status} = 'pending' and ${table.reviewedAt} is null and ${table.reviewedBy} is null) or (${table.status} <> 'pending' and ${table.reviewedAt} is not null and ${table.reviewedBy} is not null)`),
+  check('doctor_profile_fee_non_negative_check', sql`${table.consultationFeeInr} is null or ${table.consultationFeeInr} >= 0`),
+  check('doctor_profile_experience_non_negative_check', sql`${table.yearsOfExperience} is null or ${table.yearsOfExperience} >= 0`),
 ]);
 
 export const appointment = pgTable('appointment', {
