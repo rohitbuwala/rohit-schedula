@@ -13,7 +13,7 @@ describe('doctor schedule service', () => {
   it('returns default schedule when doctor has no custom schedule', async () => {
     const service = new DoctorScheduleService();
     const schedule = await service.getSchedule(doctorId);
-    expect(schedule.timezone).toBe('UTC');
+    expect(schedule.timezone).toBe('Asia/Kolkata');
     expect(schedule.activeDays).toEqual([1, 2, 3, 4, 5]);
     expect(schedule.startHour).toBe(9);
     expect(schedule.endHour).toBe(17);

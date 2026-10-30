@@ -66,4 +66,53 @@ describe('appointment availability', () => {
     });
     expect(saturdaySlots.length).toBeGreaterThan(0);
   });
+
+  it('generates slots in Asia/Kolkata (IST) timezone correctly', () => {
+    // 2027-01-04 is Monday
+    const slots = candidateSlotsForDate('2027-01-04', now, { timezone: 'Asia/Kolkata' });
+    expect(slots).toHaveLength(16);
+    // 09:00 IST is 03:30 UTC
+    expect(slots[0]?.startsAt.toISOString()).toBe('2027-01-04T03:30:00.000Z');
+    expect(slots[0]?.endsAt.toISOString()).toBe('2027-01-04T04:00:00.000Z');
+    // 17:00 IST is 11:30 UTC
+    expect(slots.at(-1)?.endsAt.toISOString()).toBe('2027-01-04T11:30:00.000Z');
+  });
+
+  it('generates 15-minute slot intervals when configured', () => {
+    const slots = candidateSlotsForDate('2027-01-04', now, {
+      timezone: 'Asia/Kolkata',
+      slotDurationMinutes: 15,
+    });
+    // 8 hours * 4 slots/hour = 32 slots
+    expect(slots).toHaveLength(32);
+    expect(slots[0]?.startsAt.toISOString()).toBe('2027-01-04T03:30:00.000Z');
+    expect(slots[0]?.endsAt.toISOString()).toBe('2027-01-04T03:45:00.000Z');
+  });
+
+  it('filters out past slots in Asia/Kolkata', () => {
+    // 10:15 IST is 04:45 UTC
+    const currentIst = new Date('2027-01-04T04:45:00.000Z');
+    const slots = candidateSlotsForDate('2027-01-04', currentIst, { timezone: 'Asia/Kolkata' });
+    // First slot should be after 10:15 IST -> 10:30 IST (05:00 UTC)
+    expect(slots[0]?.startsAt.toISOString()).toBe('2027-01-04T05:00:00.000Z');
+  });
+
+  it('accepts 15-minute and 30-minute bookable slots in IST', () => {
+    // 09:00-09:15 IST = 03:30-03:45 UTC
+    const start15 = new Date('2027-01-04T03:30:00.000Z');
+    const end15 = new Date('2027-01-04T03:45:00.000Z');
+    expect(isBookableSlot(start15, end15, now)).toBe(true);
+
+    // 09:00-09:30 IST = 03:30-04:00 UTC
+    const start30 = new Date('2027-01-04T03:30:00.000Z');
+    const end30 = new Date('2027-01-04T04:00:00.000Z');
+    expect(isBookableSlot(start30, end30, now)).toBe(true);
+
+    // Past slot should be rejected
+    expect(isBookableSlot(start30, end30, new Date('2027-01-04T04:30:00.000Z'))).toBe(false);
+
+    // Invalid duration (e.g. 10 minutes) should be rejected
+    const end10 = new Date('2027-01-04T03:40:00.000Z');
+    expect(isBookableSlot(start15, end10, now)).toBe(false);
+  });
 });

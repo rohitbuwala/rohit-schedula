@@ -36,6 +36,20 @@
       "when": 1793200000000,
       "tag": "0004_doctor_profile_extended_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793280000000,
+      "tag": "0005_availability_reschedule_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793360000000,
+      "tag": "0006_patient_profile",
+      "breakpoints": true
     }
   ]
 }

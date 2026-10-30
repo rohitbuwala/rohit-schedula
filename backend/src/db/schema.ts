@@ -96,4 +96,19 @@ export const appointment = pgTable('appointment', {
   check('appointment_time_order_check', sql`${table.endsAt} > ${table.startsAt}`),
 ]);
 
-export const schema = { user, session, account, verification, doctorProfile, appointment };
+export const patientProfile = pgTable('patient_profile', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().unique().references(() => user.id, { onDelete: 'cascade' }),
+  dateOfBirth: text('date_of_birth'),
+  gender: text('gender'),
+  phone: text('phone'),
+  bloodGroup: text('blood_group'),
+  address: text('address'),
+  allergies: text('allergies'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('patient_profile_user_idx').on(table.userId),
+]);
+
+export const schema = { user, session, account, verification, doctorProfile, appointment, patientProfile };

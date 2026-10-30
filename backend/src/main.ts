@@ -9,8 +9,13 @@ function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): bool
 
   try {
     const url = new URL(origin);
-    return url.protocol === 'https:' &&
-      /^rohit-schedula-(?:git-[a-z0-9-]+-)?[a-z0-9-]+-rohit-buwalas-projects\.vercel\.app$/.test(url.hostname);
+    if (url.protocol !== 'https:') return false;
+    const hostname = url.hostname;
+    return (
+      hostname === 'rohit-schedula.vercel.app' ||
+      /^rohit-schedula(?:-[a-z0-9-]+)?\.vercel\.app$/.test(hostname) ||
+      /^rohit-schedula-(?:git-[a-z0-9-]+-)?[a-z0-9-]+-rohit-buwalas-projects\.vercel\.app$/.test(hostname)
+    );
   } catch {
     return false;
   }
@@ -37,6 +42,6 @@ async function bootstrap() {
   registerAuthHandler(server);
   app.use(express.json());
 
-  await app.listen(env.port);
+  await app.listen(env.port, '0.0.0.0');
 }
 await bootstrap();

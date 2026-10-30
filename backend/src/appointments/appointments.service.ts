@@ -8,7 +8,7 @@ import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { canAccessAppointment } from './appointment-access.js';
 import { createWithConflictHandling } from './appointment-conflict.js';
-import { getAvailableSlots } from './appointment-availability.js';
+import { createZonedDate, getAvailableSlots } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
@@ -30,20 +30,24 @@ export class AppointmentsService {
 
     const scheduleConfig = this.scheduleService
       ? await this.scheduleService.getScheduleConfigForProfile(input.doctorProfileId)
-      : {};
+      : { timezone: 'Asia/Kolkata', slotDurationMinutes: 30 };
 
-    const dayStart = new Date(`${input.date}T00:00:00.000Z`);
+    const tz = scheduleConfig.timezone ?? 'Asia/Kolkata';
+    const dayStart = createZonedDate(input.date, 0, 0, tz);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const busy = await db.select({ startsAt: appointment.startsAt, endsAt: appointment.endsAt, status: appointment.status })
       .from(appointment)
       .where(and(eq(appointment.doctorId, doctor.userId), eq(appointment.status, 'scheduled'), lt(appointment.startsAt, dayEnd), gt(appointment.endsAt, dayStart)));
 
-    const slots = getAvailableSlots(input.date, busy, new Date(), scheduleConfig);
+    const slots = getAvailableSlots(input.date, busy, new Date(), {
+      timezone: tz,
+      ...scheduleConfig,
+    });
 
     return {
       doctorProfileId: input.doctorProfileId,
       date: input.date,
-      timezone: scheduleConfig.timezone ?? 'UTC',
+      timezone: tz,
       durationMinutes: scheduleConfig.slotDurationMinutes ?? 30,
       slots: slots.map(({ startsAt, endsAt }) => ({ startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() })),
     };
@@ -69,16 +73,16 @@ export class AppointmentsService {
       });
 
       if (this.notifications) {
-        const timeFormatted = new Intl.DateTimeFormat(undefined, {
+        const timeFormatted = new Intl.DateTimeFormat('en-IN', {
           dateStyle: 'medium',
           timeStyle: 'short',
-          timeZone: 'UTC',
+          timeZone: 'Asia/Kolkata',
         }).format(input.startsAt);
 
         void this.notifications.createNotification({
           userId: patientId,
           title: 'Appointment Booked',
-          message: `Consultation confirmed for ${timeFormatted} UTC.`,
+          message: `Consultation confirmed for ${timeFormatted} IST.`,
           type: 'booking',
           appointmentId: created.id,
         });
@@ -86,7 +90,7 @@ export class AppointmentsService {
         void this.notifications.createNotification({
           userId: doctor.userId,
           title: 'New Patient Appointment',
-          message: `A new consultation has been scheduled for ${timeFormatted} UTC.`,
+          message: `A new consultation has been scheduled for ${timeFormatted} IST.`,
           type: 'booking',
           appointmentId: created.id,
         });
@@ -104,8 +108,8 @@ export class AppointmentsService {
         doctor: { id: doctorProfile.id, name: user.name, specialty: doctorProfile.specialty, bio: doctorProfile.bio },
       }).from(appointment)
         .innerJoin(user, eq(user.id, appointment.doctorId))
-        .innerJoin(doctorProfile, and(eq(doctorProfile.userId, user.id), eq(doctorProfile.status, 'approved')))
-        .where(and(eq(appointment.patientId, actor.id), eq(user.role, 'doctor')));
+        .innerJoin(doctorProfile, eq(doctorProfile.userId, user.id))
+        .where(eq(appointment.patientId, actor.id));
     }
     if (actor.role === 'doctor') {
       return db.select({
@@ -128,8 +132,8 @@ export class AppointmentsService {
         id: appointment.id, startsAt: appointment.startsAt, endsAt: appointment.endsAt, status: appointment.status,
         doctor: { id: doctorProfile.id, name: user.name, specialty: doctorProfile.specialty, bio: doctorProfile.bio },
       }).from(appointment).innerJoin(user, eq(user.id, appointment.doctorId))
-        .innerJoin(doctorProfile, and(eq(doctorProfile.userId, user.id), eq(doctorProfile.status, 'approved')))
-        .where(and(eq(appointment.id, id), eq(appointment.patientId, actor.id), eq(user.role, 'doctor'))).limit(1);
+        .innerJoin(doctorProfile, eq(doctorProfile.userId, user.id))
+        .where(and(eq(appointment.id, id), eq(appointment.patientId, actor.id))).limit(1);
       if (!record) throw new NotFoundException('Appointment not found.');
       return record;
     }
@@ -175,6 +179,11 @@ export class AppointmentsService {
         throw new ConflictException(`Cannot reschedule an appointment that is already ${record.status}.`);
       }
 
+      const isDoctorApproved = await this.doctors.isApproved(record.doctorId);
+      if (!isDoctorApproved) {
+        throw new ConflictException('Cannot reschedule appointment because doctor is currently inactive or unapproved.');
+      }
+
       if (
         record.startsAt.getTime() === input.startsAt.getTime() &&
         record.endsAt.getTime() === input.endsAt.getTime()
@@ -183,8 +192,13 @@ export class AppointmentsService {
       }
 
       const durationMs = input.endsAt.getTime() - input.startsAt.getTime();
-      if (durationMs !== 30 * 60 * 1000) {
-        throw new BadRequestException('Appointment duration must be exactly 30 minutes.');
+      const originalDurationMs = record.endsAt.getTime() - record.startsAt.getTime();
+      if (
+        durationMs !== originalDurationMs &&
+        durationMs !== 15 * 60 * 1000 &&
+        durationMs !== 30 * 60 * 1000
+      ) {
+        throw new BadRequestException('Appointment duration must be 15 or 30 minutes.');
       }
 
       try {
@@ -210,16 +224,16 @@ export class AppointmentsService {
         }
 
         if (this.notifications) {
-          const timeFormatted = new Intl.DateTimeFormat(undefined, {
+          const timeFormatted = new Intl.DateTimeFormat('en-IN', {
             dateStyle: 'medium',
             timeStyle: 'short',
-            timeZone: 'UTC',
+            timeZone: 'Asia/Kolkata',
           }).format(input.startsAt);
 
           void this.notifications.createNotification({
             userId: record.patientId,
             title: 'Appointment Rescheduled',
-            message: `Your appointment has been rescheduled to ${timeFormatted} UTC.`,
+            message: `Your appointment has been rescheduled to ${timeFormatted} IST.`,
             type: 'reschedule',
             appointmentId: id,
           });
@@ -227,7 +241,7 @@ export class AppointmentsService {
           void this.notifications.createNotification({
             userId: record.doctorId,
             title: 'Appointment Rescheduled',
-            message: `Consultation rescheduled to ${timeFormatted} UTC.`,
+            message: `Consultation rescheduled to ${timeFormatted} IST.`,
             type: 'reschedule',
             appointmentId: id,
           });

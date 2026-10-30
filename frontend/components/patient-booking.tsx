@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { z } from "zod";
 import {
@@ -11,6 +12,7 @@ import {
   Search,
   Sparkles,
   Stethoscope,
+  User,
 } from "lucide-react";
 import { backendUrl } from "@/lib/api";
 import { appointmentFormSchema } from "@/lib/appointment-validation";
@@ -51,8 +53,8 @@ const doctorsSchema = z.array(
 const availabilitySchema = z.object({
   doctorProfileId: z.uuid(),
   date: z.iso.date(),
-  timezone: z.literal("UTC"),
-  durationMinutes: z.literal(30),
+  timezone: z.string(),
+  durationMinutes: z.number().int().positive(),
   slots: z.array(
     z.object({
       startsAt: z.iso.datetime({ offset: true }),
@@ -64,7 +66,9 @@ const availabilitySchema = z.object({
 export function PatientBooking({ name }: { name: string }) {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [selectedDoctor, setSelectedDoctor] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())
+  );
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [loadingDoctors, setLoadingDoctors] = useState(true);
@@ -227,6 +231,15 @@ export function PatientBooking({ name }: { name: string }) {
             <p className="text-teal-100/90 text-sm max-w-xl">
               Discover verified specialists, schedule conflict-free consultation slots, and track your clinical appointment history in real time.
             </p>
+            <div className="pt-1">
+              <Link
+                href="/patient/profile"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-white/15 hover:bg-white/25 px-3 py-1.5 text-xs font-semibold text-white transition border border-white/20 shadow-xs"
+              >
+                <User className="h-3.5 w-3.5 text-teal-200" />
+                Manage Patient Profile
+              </Link>
+            </div>
           </div>
 
           <div className="flex items-center gap-4 bg-white/10 backdrop-blur rounded-2xl p-4 border border-white/15">
@@ -447,7 +460,7 @@ export function PatientBooking({ name }: { name: string }) {
             </CardTitle>
           </div>
           <CardDescription>
-            Select an available 30-minute weekday window. Times are presented in UTC.
+            Select an available consultation window. Times are presented in IST (Asia/Kolkata).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -458,11 +471,11 @@ export function PatientBooking({ name }: { name: string }) {
               </div>
             )}
 
-            <FormField id="bookingDate" label="Consultation Date (UTC)">
+            <FormField id="bookingDate" label="Consultation Date (IST)">
               <Input
                 id="bookingDate"
                 type="date"
-                min={new Date().toISOString().slice(0, 10)}
+                min={new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())}
                 value={date}
                 onChange={(event) => {
                   setDate(event.target.value);
@@ -492,14 +505,14 @@ export function PatientBooking({ name }: { name: string }) {
 
             {selectedDoctor && !loadingSlots && !slotError && slots.length === 0 && (
               <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
-                No slots available on this date. Please pick another weekday.
+                No slots available on this date. Please pick another date or weekday.
               </p>
             )}
 
             {slots.length > 0 && (
               <fieldset disabled={loadingSlots} className="space-y-2">
                 <legend className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Available consultation windows
+                  Available consultation windows (IST)
                 </legend>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
                   {slots.map((slot) => {
@@ -507,12 +520,12 @@ export function PatientBooking({ name }: { name: string }) {
                     const startLabel = new Intl.DateTimeFormat(undefined, {
                       hour: "numeric",
                       minute: "2-digit",
-                      timeZone: "UTC",
+                      timeZone: "Asia/Kolkata",
                     }).format(new Date(slot.startsAt));
                     const endLabel = new Intl.DateTimeFormat(undefined, {
                       hour: "numeric",
                       minute: "2-digit",
-                      timeZone: "UTC",
+                      timeZone: "Asia/Kolkata",
                     }).format(new Date(slot.endsAt));
                     return (
                       <button
@@ -531,7 +544,7 @@ export function PatientBooking({ name }: { name: string }) {
                             : "border-slate-200 bg-white text-slate-700 hover:border-teal-400 hover:bg-teal-50/50"
                         }`}
                       >
-                        {startLabel} – {endLabel} UTC
+                        {startLabel} – {endLabel} IST
                       </button>
                     );
                   })}

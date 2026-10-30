@@ -25,7 +25,7 @@ export interface DoctorScheduleData {
 }
 
 const DEFAULT_SCHEDULE: Omit<DoctorScheduleData, 'leaves'> = {
-  timezone: 'UTC',
+  timezone: 'Asia/Kolkata',
   activeDays: [1, 2, 3, 4, 5],
   startHour: 9,
   endHour: 17,

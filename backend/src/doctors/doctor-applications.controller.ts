@@ -1,11 +1,11 @@
-import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthSessionGuard } from '../auth/auth-session.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthenticatedUser } from '../auth/authenticated-user.js';
 import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
-import { doctorApplicationSchema, doctorApplicationStatusSchema, doctorDecisionSchema } from './doctor-profile.schema.js';
+import { doctorAdminListQuerySchema, doctorApplicationSchema, doctorDecisionSchema } from './doctor-profile.schema.js';
 import { DoctorProfilesService } from './doctor-profiles.service.js';
 
 const idSchema = z.uuid();
@@ -38,7 +38,7 @@ export class AdminDoctorApplicationsController {
 
   @Get()
   list(@Query('status') status: string | undefined) {
-    const parsed = doctorApplicationStatusSchema.optional().safeParse(status);
+    const parsed = doctorAdminListQuerySchema.optional().safeParse(status);
     if (!parsed.success) throw new BadRequestException('Invalid application status.');
     return this.profiles.listApplications(parsed.data ?? 'pending');
   }
@@ -49,5 +49,55 @@ export class AdminDoctorApplicationsController {
     const parsedBody = doctorDecisionSchema.safeParse(body);
     if (!parsedId.success || !parsedBody.success) throw new BadRequestException('Invalid application decision.');
     return this.profiles.decide(parsedId.data, admin.id, parsedBody.data.decision);
+  }
+
+  @Patch(':id/deactivate')
+  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser) {
+    const parsedId = idSchema.safeParse(id);
+    if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
+    return this.profiles.deactivateDoctor(parsedId.data, admin.id);
+  }
+
+  @Delete(':id')
+  delete(@Param('id') id: string) {
+    const parsedId = idSchema.safeParse(id);
+    if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
+    return this.profiles.deleteDoctor(parsedId.data);
+  }
+}
+
+@Controller('api/admin/doctors')
+@UseGuards(AuthSessionGuard, RolesGuard)
+@Roles('admin')
+export class AdminDoctorsController {
+  constructor(private readonly profiles: DoctorProfilesService) {}
+
+  @Get()
+  list(@Query('status') status: string | undefined) {
+    const parsed = doctorAdminListQuerySchema.optional().safeParse(status);
+    if (!parsed.success) throw new BadRequestException('Invalid doctor status query.');
+    return this.profiles.listApplications(parsed.data ?? 'approved');
+  }
+
+  @Patch(':id/decision')
+  decide(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser, @Body() body: unknown) {
+    const parsedId = idSchema.safeParse(id);
+    const parsedBody = doctorDecisionSchema.safeParse(body);
+    if (!parsedId.success || !parsedBody.success) throw new BadRequestException('Invalid decision body.');
+    return this.profiles.decide(parsedId.data, admin.id, parsedBody.data.decision);
+  }
+
+  @Patch(':id/deactivate')
+  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser) {
+    const parsedId = idSchema.safeParse(id);
+    if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
+    return this.profiles.deactivateDoctor(parsedId.data, admin.id);
+  }
+
+  @Delete(':id')
+  delete(@Param('id') id: string) {
+    const parsedId = idSchema.safeParse(id);
+    if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
+    return this.profiles.deleteDoctor(parsedId.data);
   }
 }

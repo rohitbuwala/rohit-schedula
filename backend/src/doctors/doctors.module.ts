@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module.js';
 import { AuthSessionGuard } from '../auth/auth-session.guard.js';
 import { RolesGuard } from '../auth/roles.guard.js';
-import { AdminDoctorApplicationsController, DoctorApplicationsController } from './doctor-applications.controller.js';
+import { AdminDoctorApplicationsController, AdminDoctorsController, DoctorApplicationsController } from './doctor-applications.controller.js';
 import { DoctorApprovedGuard } from './doctor-approved.guard.js';
 import { DoctorsController } from './doctors.controller.js';
 import { DoctorProfilesService } from './doctor-profiles.service.js';
@@ -15,6 +15,7 @@ import { DoctorScheduleService } from './doctor-schedule.service.js';
     DoctorsController,
     DoctorApplicationsController,
     AdminDoctorApplicationsController,
+    AdminDoctorsController,
     DoctorScheduleController,
   ],
   providers: [
