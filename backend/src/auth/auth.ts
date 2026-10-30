@@ -13,7 +13,10 @@ export function createAuth(database: AuthDatabase) {
     appName: 'Medrella',
     baseURL: env.betterAuthUrl,
     secret: env.betterAuthSecret,
-    trustedOrigins: [env.frontendUrl],
+    trustedOrigins: [
+      env.frontendUrl,
+      'https://rohit-schedula-*-rohit-buwalas-projects.vercel.app',
+    ],
     database,
     emailAndPassword: { enabled: true },
     user: {

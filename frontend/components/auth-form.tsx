@@ -19,7 +19,8 @@ export function AuthForm({ mode }: { mode: Mode }) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(""); setFieldErrors({});
+    setError("");
+    setFieldErrors({});
     const form = new FormData(event.currentTarget);
     const raw = Object.fromEntries(form.entries());
     const parsed = mode === "signup" ? signupSchema.safeParse(raw) : loginSchema.safeParse(raw);
@@ -27,16 +28,36 @@ export function AuthForm({ mode }: { mode: Mode }) {
       setFieldErrors(Object.fromEntries(parsed.error.issues.map((issue) => [String(issue.path[0]), issue.message])));
       return;
     }
+
     setBusy(true);
     try {
       const result = mode === "signup"
         ? await authClient.signUp.email({ name: String(raw.name), email: String(raw.email), password: String(raw.password) })
         : await authClient.signIn.email({ email: String(raw.email), password: String(raw.password) });
-      if (result.error) setError(result.error.message ?? "Authentication failed. Check your details and try again.");
-      else { router.push("/dashboard"); router.refresh(); }
+
+      if (result.error) {
+        setError(result.error.message ?? "Authentication failed. Check your details and try again.");
+        return;
+      }
+
+      // Do not redirect into a dashboard until the browser can read the session.
+      // This catches missing/blocked session cookies instead of silently looping to /login.
+      const sessionResult = await authClient.getSession();
+      const session = sessionResult.data;
+      if (sessionResult.error || !session?.user) {
+        setError("Your credentials were accepted, but your session was not saved. Please refresh once and try again. If this continues, contact support.");
+        return;
+      }
+
+      const role = (session.user as { role?: string }).role;
+      const destination = role === "admin" ? "/admin" : role === "doctor" ? "/doctor/dashboard" : "/patient/dashboard";
+      router.replace(destination);
+      router.refresh();
     } catch {
-      setError("We could not reach the sign-in service. Please try again.");
-    } finally { setBusy(false); }
+      setError("We could not complete sign-in. Please check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   const signup = mode === "signup";
