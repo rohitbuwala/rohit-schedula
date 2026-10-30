@@ -23,6 +23,7 @@ export const doctorDecisionSchema = z.object({
 }).strict();
 
 export const doctorApplicationStatusSchema = z.enum(['pending', 'approved', 'rejected']);
+export const doctorAdminListQuerySchema = z.enum(['pending', 'approved', 'rejected', 'all']);
 
 export type DoctorApplicationInput = z.infer<typeof doctorApplicationSchema>;
 

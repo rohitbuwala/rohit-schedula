@@ -1,8 +1,8 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { db } from '../db/database.js';
-import { doctorProfile, user } from '../db/schema.js';
+import { appointment, doctorProfile, user } from '../db/schema.js';
 import { toPublicDoctorProfile, type DoctorApplicationInput } from './doctor-profile.schema.js';
 
 /** Columns selected for the admin application review list — includes private fields. */
@@ -68,29 +68,115 @@ export class DoctorProfilesService {
     return profile ? this.applicantView(profile) : null;
   }
 
-  async listApplications(status: 'pending' | 'approved' | 'rejected' = 'pending') {
-    return db.select(adminApplicationColumns)
-      .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
-      .where(eq(doctorProfile.status, status)).orderBy(desc(doctorProfile.submittedAt));
+  async listApplications(status: 'pending' | 'approved' | 'rejected' | 'all' = 'pending') {
+    const baseQuery = db.select(adminApplicationColumns)
+      .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId));
+
+    const rows = status === 'all'
+      ? await baseQuery.orderBy(desc(doctorProfile.submittedAt))
+      : await baseQuery.where(eq(doctorProfile.status, status)).orderBy(desc(doctorProfile.submittedAt));
+
+    const appointmentCounts = await db.select({
+      doctorId: appointment.doctorId,
+      count: sql<number>`count(*)::int`,
+    }).from(appointment).groupBy(appointment.doctorId);
+
+    const countMap = new Map(appointmentCounts.map((a) => [a.doctorId, a.count]));
+
+    return rows.map((row) => ({
+      ...row,
+      appointmentCount: countMap.get(row.userId) ?? 0,
+    }));
   }
 
   async decide(applicationId: string, reviewerId: string, decision: 'approved' | 'rejected') {
     return db.transaction(async (tx) => {
       const [application] = await tx.select().from(doctorProfile)
-        .where(and(eq(doctorProfile.id, applicationId), eq(doctorProfile.status, 'pending')))
+        .where(eq(doctorProfile.id, applicationId))
         .for('update').limit(1);
-      if (!application) throw new NotFoundException('Pending application not found.');
+      if (!application) throw new NotFoundException('Doctor profile not found.');
+
       const [applicant] = await tx.select({ id: user.id, role: user.role }).from(user)
         .where(eq(user.id, application.userId)).limit(1);
-      if (!applicant || applicant.role !== 'patient') throw new ConflictException('Applicant is not an eligible patient.');
+      if (!applicant) throw new NotFoundException('Applicant user account not found.');
 
-      const [updated] = await tx.update(doctorProfile).set({ status: decision, reviewedAt: new Date(), reviewedBy: reviewerId })
-        .where(and(eq(doctorProfile.id, applicationId), eq(doctorProfile.status, 'pending'))).returning();
-      if (!updated) throw new ConflictException('Application changed; refresh and try again.');
-      if (decision === 'approved') {
-        await tx.update(user).set({ role: 'doctor', updatedAt: new Date() }).where(eq(user.id, application.userId));
+      if (application.status === 'pending') {
+        if (applicant.role !== 'patient') throw new ConflictException('Applicant is not an eligible patient.');
+        const [updated] = await tx.update(doctorProfile).set({ status: decision, reviewedAt: new Date(), reviewedBy: reviewerId })
+          .where(and(eq(doctorProfile.id, applicationId), eq(doctorProfile.status, 'pending'))).returning();
+        if (!updated) throw new ConflictException('Application changed; refresh and try again.');
+        if (decision === 'approved') {
+          await tx.update(user).set({ role: 'doctor', updatedAt: new Date() }).where(eq(user.id, application.userId));
+        }
+        return { id: updated.id, userId: updated.userId, status: updated.status, reviewedAt: updated.reviewedAt };
       }
-      return { id: updated.id, userId: updated.userId, status: updated.status, reviewedAt: updated.reviewedAt };
+
+      if (application.status === 'approved') {
+        if (decision === 'rejected') {
+          // Deactivate / unapprove workflow: hides doctor from bookings, preserves all appointments and history
+          const [updated] = await tx.update(doctorProfile).set({ status: 'rejected', reviewedAt: new Date(), reviewedBy: reviewerId })
+            .where(eq(doctorProfile.id, applicationId)).returning();
+          if (!updated) throw new ConflictException('Application changed; refresh and try again.');
+          await tx.update(user).set({ role: 'patient', updatedAt: new Date() }).where(eq(user.id, application.userId));
+          return { id: updated.id, userId: updated.userId, status: updated.status, reviewedAt: updated.reviewedAt };
+        }
+        return { id: application.id, userId: application.userId, status: application.status, reviewedAt: application.reviewedAt };
+      }
+
+      if (application.status === 'rejected') {
+        if (decision === 'approved') {
+          // Reactivate previously rejected / deactivated doctor
+          const [updated] = await tx.update(doctorProfile).set({ status: 'approved', reviewedAt: new Date(), reviewedBy: reviewerId })
+            .where(eq(doctorProfile.id, applicationId)).returning();
+          if (!updated) throw new ConflictException('Application changed; refresh and try again.');
+          await tx.update(user).set({ role: 'doctor', updatedAt: new Date() }).where(eq(user.id, application.userId));
+          return { id: updated.id, userId: updated.userId, status: updated.status, reviewedAt: updated.reviewedAt };
+        }
+        return { id: application.id, userId: application.userId, status: application.status, reviewedAt: application.reviewedAt };
+      }
+
+      throw new ConflictException('Unknown application state.');
+    });
+  }
+
+  async deactivateDoctor(profileId: string, reviewerId: string) {
+    return this.decide(profileId, reviewerId, 'rejected');
+  }
+
+  async deleteDoctor(profileIdOrUserId: string) {
+    const [profile] = await db.select().from(doctorProfile)
+      .where(or(eq(doctorProfile.id, profileIdOrUserId), eq(doctorProfile.userId, profileIdOrUserId)))
+      .limit(1);
+    if (!profile) throw new NotFoundException('Doctor profile not found.');
+
+    // 1. Block deletion if appointment records reference this doctor (preserves medical records & prevents constraint error)
+    const [existingAppointment] = await db.select({ id: appointment.id })
+      .from(appointment)
+      .where(or(eq(appointment.doctorId, profile.userId), eq(appointment.patientId, profile.userId)))
+      .limit(1);
+
+    if (existingAppointment) {
+      throw new ConflictException(
+        'Cannot permanently delete doctor because appointments are associated with this doctor. Deactivate or unapprove the doctor instead to preserve medical appointment history.',
+      );
+    }
+
+    // 2. Block deletion if this doctor account reviewed other doctor applications as an administrator
+    const [reviewedOther] = await db.select({ id: doctorProfile.id })
+      .from(doctorProfile)
+      .where(eq(doctorProfile.reviewedBy, profile.userId))
+      .limit(1);
+
+    if (reviewedOther) {
+      throw new ConflictException(
+        'Cannot permanently delete doctor because this account has reviewed other doctor applications as an administrator. Deactivate the doctor instead.',
+      );
+    }
+
+    return db.transaction(async (tx) => {
+      await tx.delete(doctorProfile).where(eq(doctorProfile.id, profile.id));
+      await tx.update(user).set({ role: 'patient', updatedAt: new Date() }).where(eq(user.id, profile.userId));
+      return { id: profile.id, deleted: true, message: 'Doctor profile permanently deleted.' };
     });
   }
 

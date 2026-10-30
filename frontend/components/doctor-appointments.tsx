@@ -25,7 +25,7 @@ function formatDate(iso: string): string {
     year: "numeric",
     month: "short",
     day: "numeric",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(iso));
 }
 
@@ -33,14 +33,14 @@ function formatTime(startsAt: string, endsAt: string): string {
   const start = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(startsAt));
   const end = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(endsAt));
-  return `${start} – ${end} UTC`;
+  return `${start} – ${end} IST`;
 }
 
 function StatusBadge({ status }: { status: DoctorAppointment["status"] }) {

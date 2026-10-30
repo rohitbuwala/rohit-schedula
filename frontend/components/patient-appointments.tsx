@@ -25,7 +25,7 @@ function formatDate(iso: string): string {
     year: "numeric",
     month: "short",
     day: "numeric",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(iso));
 }
 
@@ -33,14 +33,14 @@ function formatTime(startsAt: string, endsAt: string): string {
   const start = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(startsAt));
   const end = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "UTC",
+    timeZone: "Asia/Kolkata",
   }).format(new Date(endsAt));
-  return `${start} – ${end} UTC`;
+  return `${start} – ${end} IST`;
 }
 
 function StatusBadge({ status }: { status: PatientAppointment["status"] }) {
@@ -97,7 +97,9 @@ export function PatientAppointments({
   // Rescheduling state
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [rescheduleDoctorProfileId, setRescheduleDoctorProfileId] = useState<string>("");
-  const [rescheduleDate, setRescheduleDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [rescheduleDate, setRescheduleDate] = useState(() =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())
+  );
   const [rescheduleSlots, setRescheduleSlots] = useState<Slot[]>([]);
   const [selectedRescheduleSlot, setSelectedRescheduleSlot] = useState<Slot | null>(null);
   const [loadingRescheduleSlots, setLoadingRescheduleSlots] = useState(false);
@@ -547,7 +549,7 @@ function AppointmentCard({
                 </label>
                 <Input
                   type="date"
-                  min={new Date().toISOString().slice(0, 10)}
+                  min={new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())}
                   value={rescheduleDate}
                   onChange={(e) => onRescheduleDateChange?.(e.target.value)}
                   className="text-xs bg-white h-8"

@@ -6,7 +6,7 @@ const sessionSchema = z.object({
   session: z.object({ id: z.string() }),
 }).passthrough();
 
-const authUrl = process.env.NEXT_PUBLIC_AUTH_URL ?? "http://localhost:5000";
+const authUrl = (process.env.NEXT_PUBLIC_AUTH_URL ?? "http://localhost:5000").replace(/\/+$/, "");
 
 export async function getVerifiedSession() {
   try {

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CurrentYear } from "@/components/current-year";
 import {
   Activity,
   CalendarCheck2,
@@ -213,7 +214,7 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-teal-700" />
             <span className="font-bold text-slate-800">Medrella Healthcare Systems</span>
-            <span>&copy; 2026</span>
+            <span>&copy; <CurrentYear /></span>
           </div>
           <p>Secure, role-based access for patients and registered healthcare professionals.</p>
         </div>
