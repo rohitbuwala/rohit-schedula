@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import {
   Activity,
+  Calendar,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -57,7 +58,8 @@ export function AppShell({ role, userName, children }: AppShellProps) {
   const navItems: NavItem[] =
     role === "patient"
       ? [
-          { label: "Overview & Booking", href: "/patient/dashboard", icon: LayoutDashboard },
+          { label: "Dashboard Overview", href: "/patient/dashboard", icon: LayoutDashboard },
+          { label: "Book Appointment", href: "/patient/book-appointment", icon: Calendar },
           { label: "My Profile", href: "/patient/profile", icon: User },
           { label: "Apply as Doctor", href: "/patient/doctor-application", icon: Stethoscope },
         ]
@@ -91,9 +93,9 @@ export function AppShell({ role, userName, children }: AppShellProps) {
   const currentRoleMeta = roleLabels[role] || roleLabels.patient;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
+    <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Mobile Header */}
-      <header className="md:hidden flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4">
+      <header className="md:hidden flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 sticky top-0 z-40">
         <Link href="/" className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-tr from-teal-700 to-cyan-600 text-white">
             <Activity className="h-4 w-4" />
@@ -135,7 +137,7 @@ export function AppShell({ role, userName, children }: AppShellProps) {
                   onClick={() => setMobileOpen(false)}
                   className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
                     active
-                      ? "bg-teal-50 text-teal-800"
+                      ? "bg-teal-50 text-teal-800 font-semibold"
                       : "text-slate-700 hover:bg-slate-100 hover:text-slate-900"
                   }`}
                 >
@@ -161,27 +163,27 @@ export function AppShell({ role, userName, children }: AppShellProps) {
         </aside>
       )}
 
-      {/* Desktop Sidebar */}
-      <aside className="hidden md:flex w-64 flex-col justify-between border-r border-slate-200 bg-white px-5 py-6 shrink-0 min-h-screen">
-        <div className="space-y-6">
-          {/* Logo & Portal Info */}
-          <div>
-            <Link href="/" className="flex items-center gap-2.5 group">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-teal-700 to-cyan-600 text-white shadow-sm shadow-teal-700/20 group-hover:scale-105 transition-transform">
-                <Activity className="h-5 w-5" />
-              </div>
-              <div>
-                <span className="text-xl font-bold tracking-tight text-slate-900">
-                  Med<span className="text-teal-700">rella</span>
-                </span>
-                <p className="text-[11px] font-medium tracking-wide uppercase text-slate-400">
-                  {currentRoleMeta.title}
-                </p>
-              </div>
-            </Link>
-          </div>
+      {/* Fixed Desktop Sidebar */}
+      <aside className="hidden md:flex fixed inset-y-0 left-0 w-64 h-[100dvh] z-30 flex-col border-r border-slate-200 bg-white px-5 py-6 shrink-0">
+        {/* Top: Logo & Portal Info */}
+        <div className="shrink-0 mb-6">
+          <Link href="/" className="flex items-center gap-2.5 group">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-tr from-teal-700 to-cyan-600 text-white shadow-sm shadow-teal-700/20 group-hover:scale-105 transition-transform">
+              <Activity className="h-5 w-5" />
+            </div>
+            <div>
+              <span className="text-xl font-bold tracking-tight text-slate-900">
+                Med<span className="text-teal-700">rella</span>
+              </span>
+              <p className="text-[11px] font-medium tracking-wide uppercase text-slate-400">
+                {currentRoleMeta.title}
+              </p>
+            </div>
+          </Link>
+        </div>
 
-          {/* Navigation Links */}
+        {/* Middle: Independently Scrollable Navigation Area */}
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1 -mr-1">
           <nav className="space-y-1.5" aria-label="Sidebar navigation">
             <p className="px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
               Menu
@@ -207,15 +209,15 @@ export function AppShell({ role, userName, children }: AppShellProps) {
           </nav>
         </div>
 
-        {/* User Card & Logout */}
-        <div className="pt-6 border-t border-slate-100 space-y-4">
+        {/* Bottom: Pinned User Card & Logout Footer */}
+        <div className="shrink-0 pt-4 mt-4 border-t border-slate-100 space-y-4">
           <div className="flex items-center gap-3 px-2">
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700 border border-slate-200">
               {userName.charAt(0).toUpperCase()}
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-slate-900 truncate">{userName}</p>
-              <span className={`inline-block text-[11px] px-2 py-0.2 rounded-full border ${currentRoleMeta.color}`}>
+              <span className={`inline-block text-[11px] px-2 py-0.5 rounded-full border ${currentRoleMeta.color}`}>
                 {currentRoleMeta.badge}
               </span>
             </div>
@@ -235,9 +237,9 @@ export function AppShell({ role, userName, children }: AppShellProps) {
         </div>
       </aside>
 
-      {/* Main Content Workspace */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="hidden md:flex h-16 items-center justify-between border-b border-slate-200 bg-white/80 backdrop-blur px-8">
+      {/* Main Content Workspace - Offset by sidebar width on desktop */}
+      <div className="flex-1 flex flex-col min-w-0 md:pl-64 min-h-screen">
+        <header className="hidden md:flex h-16 sticky top-0 z-20 shrink-0 items-center justify-between border-b border-slate-200 bg-white/80 backdrop-blur px-8">
           <div className="flex items-center gap-2 text-sm text-slate-500">
             <span>Medrella</span>
             <span>/</span>
@@ -253,7 +255,7 @@ export function AppShell({ role, userName, children }: AppShellProps) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 min-w-0">
           {children}
         </main>
       </div>

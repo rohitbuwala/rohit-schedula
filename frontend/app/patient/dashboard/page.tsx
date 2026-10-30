@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { getVerifiedSession, dashboardPath } from "@/lib/auth-server";
-import { PatientBooking } from "@/components/patient-booking";
+import { PatientOverview } from "@/components/patient-overview";
 import { AppShell } from "@/components/app-shell";
 
 export const instant = false;
@@ -12,7 +12,7 @@ export default async function PatientDashboard() {
 
   return (
     <AppShell role="patient" userName={session.user.name}>
-      <PatientBooking name={session.user.name} />
+      <PatientOverview name={session.user.name} />
     </AppShell>
   );
 }
