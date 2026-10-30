@@ -8,7 +8,7 @@ import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { canAccessAppointment } from './appointment-access.js';
 import { createWithConflictHandling } from './appointment-conflict.js';
-import { createZonedDate, getAvailableSlots } from './appointment-availability.js';
+import { createZonedDate, getAvailableSlots, isBookableSlot } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
@@ -40,8 +40,8 @@ export class AppointmentsService {
       .where(and(eq(appointment.doctorId, doctor.userId), eq(appointment.status, 'scheduled'), lt(appointment.startsAt, dayEnd), gt(appointment.endsAt, dayStart)));
 
     const slots = getAvailableSlots(input.date, busy, new Date(), {
-      timezone: tz,
       ...scheduleConfig,
+      timezone: tz,
     });
 
     return {
@@ -57,6 +57,29 @@ export class AppointmentsService {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
     if (!doctor) throw new NotFoundException('Approved doctor not found.');
     if (doctor.userId === patientId) throw new ForbiddenException();
+
+    const scheduleConfig = this.scheduleService
+      ? await this.scheduleService.getScheduleConfigForProfile(input.doctorProfileId)
+      : { timezone: 'Asia/Kolkata', slotDurationMinutes: 30 };
+    const tz = scheduleConfig.timezone ?? 'Asia/Kolkata';
+
+    if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), { ...scheduleConfig, timezone: tz })) {
+      throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
+    }
+
+    const busy = await db.select({ id: appointment.id })
+      .from(appointment)
+      .where(and(
+        eq(appointment.doctorId, doctor.userId),
+        eq(appointment.status, 'scheduled'),
+        lt(appointment.startsAt, input.endsAt),
+        gt(appointment.endsAt, input.startsAt),
+      ))
+      .limit(1);
+
+    if (busy.length > 0) {
+      throw new ConflictException('The selected doctor already has a scheduled appointment in that time slot.');
+    }
 
     return createWithConflictHandling(async () => {
       const [created] = await db.insert(appointment).values({

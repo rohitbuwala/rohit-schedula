@@ -154,7 +154,7 @@ export function isBookableSlot(
   const dateInTz = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(startsAt);
 
   if (config?.slotDurationMinutes) {
-    return candidateSlotsForDate(dateInTz, now, config).some(
+    return candidateSlotsForDate(dateInTz, now, { ...config, timezone: tz }).some(
       (slot) =>
         slot.startsAt.getTime() === startsAt.getTime() &&
         slot.endsAt.getTime() === endsAt.getTime()
