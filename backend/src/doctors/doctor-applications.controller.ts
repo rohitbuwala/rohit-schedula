@@ -24,7 +24,7 @@ export class DoctorApplicationsController {
   }
 
   @Get('me')
-  @Roles('patient')
+  @Roles('patient', 'doctor')
   getMine(@CurrentUser() user: AuthenticatedUser) {
     return this.profiles.getApplicationForApplicant(user.id);
   }
@@ -47,15 +47,27 @@ export class AdminDoctorApplicationsController {
   decide(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser, @Body() body: unknown) {
     const parsedId = idSchema.safeParse(id);
     const parsedBody = doctorDecisionSchema.safeParse(body);
-    if (!parsedId.success || !parsedBody.success) throw new BadRequestException('Invalid application decision.');
-    return this.profiles.decide(parsedId.data, admin.id, parsedBody.data.decision);
+    if (!parsedId.success || !parsedBody.success) {
+      throw new BadRequestException(
+        !parsedBody.success ? parsedBody.error.flatten() : 'Invalid application decision.'
+      );
+    }
+    return this.profiles.decide(
+      parsedId.data,
+      admin.id,
+      parsedBody.data.decision,
+      parsedBody.data.decision === 'rejected' ? parsedBody.data.reason : undefined,
+    );
   }
 
   @Patch(':id/deactivate')
-  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser) {
+  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser, @Body() body: unknown) {
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
-    return this.profiles.deactivateDoctor(parsedId.data, admin.id);
+    const reason = typeof body === 'object' && body !== null && 'reason' in body
+      ? String((body as { reason?: unknown }).reason)
+      : 'Deactivated by administrator';
+    return this.profiles.deactivateDoctor(parsedId.data, admin.id, reason);
   }
 
   @Delete(':id')
@@ -83,15 +95,27 @@ export class AdminDoctorsController {
   decide(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser, @Body() body: unknown) {
     const parsedId = idSchema.safeParse(id);
     const parsedBody = doctorDecisionSchema.safeParse(body);
-    if (!parsedId.success || !parsedBody.success) throw new BadRequestException('Invalid decision body.');
-    return this.profiles.decide(parsedId.data, admin.id, parsedBody.data.decision);
+    if (!parsedId.success || !parsedBody.success) {
+      throw new BadRequestException(
+        !parsedBody.success ? parsedBody.error.flatten() : 'Invalid decision body.'
+      );
+    }
+    return this.profiles.decide(
+      parsedId.data,
+      admin.id,
+      parsedBody.data.decision,
+      parsedBody.data.decision === 'rejected' ? parsedBody.data.reason : undefined,
+    );
   }
 
   @Patch(':id/deactivate')
-  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser) {
+  deactivate(@Param('id') id: string, @CurrentUser() admin: AuthenticatedUser, @Body() body: unknown) {
     const parsedId = idSchema.safeParse(id);
     if (!parsedId.success) throw new BadRequestException('Invalid doctor profile id.');
-    return this.profiles.deactivateDoctor(parsedId.data, admin.id);
+    const reason = typeof body === 'object' && body !== null && 'reason' in body
+      ? String((body as { reason?: unknown }).reason)
+      : 'Deactivated by administrator';
+    return this.profiles.deactivateDoctor(parsedId.data, admin.id, reason);
   }
 
   @Delete(':id')

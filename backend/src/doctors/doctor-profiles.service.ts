@@ -1,9 +1,14 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, or, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { db } from '../db/database.js';
 import { appointment, doctorProfile, user } from '../db/schema.js';
-import { toPublicDoctorProfile, type DoctorApplicationInput } from './doctor-profile.schema.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
+import {
+  toPublicDoctorProfile,
+  type DoctorApplicationInput,
+  type DoctorProfileUpdateInput,
+} from './doctor-profile.schema.js';
 
 /** Columns selected for the admin application review list — includes private fields. */
 const adminApplicationColumns = {
@@ -44,6 +49,13 @@ const publicProfileColumns = {
 
 @Injectable()
 export class DoctorProfilesService {
+  private readonly rejectionReasons = new Map<string, string>();
+
+  constructor(
+    @Optional()
+    private readonly notifications?: NotificationsService,
+  ) {}
+
   async isApproved(userId: string): Promise<boolean> {
     const rows = await db.select({ userId: doctorProfile.userId }).from(doctorProfile)
       .where(and(eq(doctorProfile.userId, userId), eq(doctorProfile.status, 'approved'))).limit(1);
@@ -52,10 +64,14 @@ export class DoctorProfilesService {
 
   async apply(userId: string, input: DoctorApplicationInput) {
     const [existing] = await db.select().from(doctorProfile).where(eq(doctorProfile.userId, userId)).limit(1);
-    if (existing && existing.status !== 'rejected') throw new ConflictException('An application already exists.');
+    if (existing && existing.status === 'approved') {
+      throw new ConflictException('Doctor profile is already approved.');
+    }
     const values = { ...input, status: 'pending' as const, submittedAt: new Date(), reviewedAt: null, reviewedBy: null };
     if (existing) {
-      const [updated] = await db.update(doctorProfile).set(values).where(and(eq(doctorProfile.id, existing.id), eq(doctorProfile.status, 'rejected'))).returning();
+      // Clear previous rejection reason upon resubmission
+      this.rejectionReasons.delete(existing.id);
+      const [updated] = await db.update(doctorProfile).set(values).where(eq(doctorProfile.id, existing.id)).returning();
       if (!updated) throw new ConflictException('Application changed; refresh and try again.');
       return this.applicantView(updated);
     }
@@ -86,11 +102,18 @@ export class DoctorProfilesService {
     return rows.map((row) => ({
       ...row,
       appointmentCount: countMap.get(row.userId) ?? 0,
+      rejectionReason: this.rejectionReasons.get(row.id) ?? null,
     }));
   }
 
-  async decide(applicationId: string, reviewerId: string, decision: 'approved' | 'rejected') {
-    return db.transaction(async (tx) => {
+  async decide(applicationId: string, reviewerId: string, decision: 'approved' | 'rejected', reason?: string) {
+    if (decision === 'rejected' && reason) {
+      this.rejectionReasons.set(applicationId, reason);
+    } else if (decision === 'approved') {
+      this.rejectionReasons.delete(applicationId);
+    }
+
+    const result = await db.transaction(async (tx) => {
       const [application] = await tx.select().from(doctorProfile)
         .where(eq(doctorProfile.id, applicationId))
         .for('update').limit(1);
@@ -137,10 +160,40 @@ export class DoctorProfilesService {
 
       throw new ConflictException('Unknown application state.');
     });
+
+    // Send asynchronous notification if service is available
+    if (this.notifications) {
+      try {
+        if (decision === 'approved') {
+          await this.notifications.createNotification({
+            userId: result.userId,
+            title: 'Doctor Application Approved',
+            message: 'Congratulations! Your medical credentials have been verified by Medrella administration. Your doctor dashboard, practice profile, and patient scheduling are now active.',
+            type: 'system',
+          });
+        } else {
+          await this.notifications.createNotification({
+            userId: result.userId,
+            title: 'Doctor Application Status Update',
+            message: reason
+              ? `Your medical credentials review could not be approved. Reason: ${reason}. Please update your credentials on your dashboard and resubmit.`
+              : 'Your medical credentials review could not be approved at this time. Please update your credentials on your dashboard and resubmit.',
+            type: 'system',
+          });
+        }
+      } catch {
+        // Notification delivery failure does not rollback transaction
+      }
+    }
+
+    return {
+      ...result,
+      rejectionReason: decision === 'rejected' ? (reason ?? null) : null,
+    };
   }
 
-  async deactivateDoctor(profileId: string, reviewerId: string) {
-    return this.decide(profileId, reviewerId, 'rejected');
+  async deactivateDoctor(profileId: string, reviewerId: string, reason = 'Deactivated by administrator') {
+    return this.decide(profileId, reviewerId, 'rejected', reason);
   }
 
   async deleteDoctor(profileIdOrUserId: string) {
@@ -215,7 +268,34 @@ export class DoctorProfilesService {
     }).from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
       .where(and(eq(user.id, userId), eq(doctorProfile.status, 'approved'), eq(user.role, 'doctor'))).limit(1);
     if (!profile) throw new NotFoundException('Approved doctor profile not found.');
-    return profile;
+    return {
+      ...profile,
+      status: 'approved' as const,
+      isVerified: true,
+    };
+  }
+
+  async updateOwnApprovedProfile(userId: string, input: DoctorProfileUpdateInput) {
+    const [existing] = await db.select().from(doctorProfile)
+      .where(and(eq(doctorProfile.userId, userId), eq(doctorProfile.status, 'approved'))).limit(1);
+    if (!existing) throw new NotFoundException('Approved doctor profile not found.');
+
+    const valuesToUpdate: Partial<typeof doctorProfile.$inferInsert> = {};
+    if (input.bio !== undefined) valuesToUpdate.bio = input.bio;
+    if (input.phone !== undefined) valuesToUpdate.phone = input.phone;
+    if (input.qualifications !== undefined) valuesToUpdate.qualifications = input.qualifications;
+    if (input.yearsOfExperience !== undefined) valuesToUpdate.yearsOfExperience = input.yearsOfExperience;
+    if (input.consultationFeeInr !== undefined) valuesToUpdate.consultationFeeInr = input.consultationFeeInr;
+    if (input.clinicName !== undefined) valuesToUpdate.clinicName = input.clinicName;
+    if (input.clinicAddress !== undefined) valuesToUpdate.clinicAddress = input.clinicAddress;
+    if (input.profilePhotoUrl !== undefined) valuesToUpdate.profilePhotoUrl = input.profilePhotoUrl;
+
+    if (Object.keys(valuesToUpdate).length > 0) {
+      await db.update(doctorProfile).set(valuesToUpdate)
+        .where(eq(doctorProfile.id, existing.id));
+    }
+
+    return this.getOwnApprovedProfile(userId);
   }
 
   private applicantView(profile: typeof doctorProfile.$inferSelect) {
@@ -235,6 +315,7 @@ export class DoctorProfilesService {
       status: profile.status,
       submittedAt: profile.submittedAt,
       reviewedAt: profile.reviewedAt,
+      rejectionReason: this.rejectionReasons.get(profile.id) ?? null,
     };
   }
 }

@@ -39,6 +39,7 @@ const pendingApplicationSchema = z.object({
   reviewedAt: z.string().nullable(),
   reviewedBy: z.string().nullable(),
   appointmentCount: z.number().int().optional(),
+  rejectionReason: z.string().nullable().optional(),
 });
 const pendingApplicationsResponseSchema = z.array(pendingApplicationSchema);
 type PendingApplication = z.infer<typeof pendingApplicationSchema>;
@@ -52,6 +53,11 @@ export function AdminDoctorApplications() {
   const [activeAction, setActiveAction] = useState<{ id: string; action: "approve" | "reject" | "delete" } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"pending" | "approved" | "rejected" | "all">("all");
+
+  // Rejection prompt state
+  const [promptRejectApp, setPromptRejectApp] = useState<PendingApplication | null>(null);
+  const [rejectionReasonInput, setRejectionReasonInput] = useState("");
+  const [rejectReasonError, setRejectReasonError] = useState("");
 
   const loadApplications = useCallback(async (filter: string) => {
     const response = await fetch(`${backendUrl}/api/admin/doctor-applications?status=${encodeURIComponent(filter)}`, {
@@ -74,8 +80,12 @@ export function AdminDoctorApplications() {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setLoadError("");
+    queueMicrotask(() => {
+      if (active) {
+        setLoading(true);
+        setLoadError("");
+      }
+    });
     loadApplications(statusFilter)
       .then((result) => {
         if (active) setApplications(result);
@@ -103,18 +113,23 @@ export function AdminDoctorApplications() {
     }
   }
 
-  async function decide(application: PendingApplication, decision: "approved" | "rejected") {
+  async function decide(application: PendingApplication, decision: "approved" | "rejected", reason?: string) {
     setActionError("");
     setNotice("");
     setActiveAction({ id: application.id, action: decision === "approved" ? "approve" : "reject" });
     try {
+      const payload: { decision: "approved" | "rejected"; reason?: string } = { decision };
+      if (decision === "rejected" && reason) {
+        payload.reason = reason;
+      }
+
       const response = await fetch(
         `${backendUrl}/api/admin/doctor-applications/${encodeURIComponent(application.id)}/decision`,
         {
           method: "PATCH",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ decision }),
+          body: JSON.stringify(payload),
         }
       );
       if (response.status === 401) throw new Error("Your session expired. Log in again.");
@@ -123,13 +138,16 @@ export function AdminDoctorApplications() {
         const errorBody = await response.json().catch(() => ({}));
         throw new Error(errorBody.message || "Could not update doctor application.");
       }
-      if (!response.ok) throw new Error("Could not update the application. Please try again.");
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody.message || "Could not update the application. Please check rejection reason.");
+      }
 
       const actionVerb = decision === "approved"
         ? (application.status === "rejected" ? "reactivated and approved" : "approved")
         : "deactivated (safe unapproval)";
 
-      setNotice(`${application.name} was successfully ${actionVerb}. Appointment history is preserved.`);
+      setNotice(`${application.name} was successfully ${actionVerb}. Medical records and appointment history are preserved.`);
       setApplications(await loadApplications(statusFilter));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Could not update the application. Please try again.");
@@ -202,101 +220,106 @@ export function AdminDoctorApplications() {
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 rounded-full bg-purple-800/60 px-3 py-1 text-xs font-semibold text-purple-200 backdrop-blur">
               <ShieldCheck className="h-3.5 w-3.5 text-purple-300" />
-              Medrella Medical Board Oversight
+              Administrative Verification Console
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
-              Doctor Credential Verification & Management
+              Physician Credential Verification
             </h1>
-            <p className="text-purple-100/90 text-sm max-w-xl">
-              Inspect medical credentials, safely deactivate doctors from new bookings to preserve medical appointment history, or delete eligible profiles.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 bg-white/10 backdrop-blur rounded-2xl p-3 border border-white/15 text-center">
-            <div className="px-3 py-1 border-r border-white/15">
-              <p className="text-xl font-extrabold text-amber-300">{counts.pending}</p>
-              <p className="text-[10px] font-medium text-purple-200 uppercase tracking-wider">Pending</p>
-            </div>
-            <div className="px-3 py-1 border-r border-white/15">
-              <p className="text-xl font-extrabold text-emerald-300">{counts.approved}</p>
-              <p className="text-[10px] font-medium text-purple-200 uppercase tracking-wider">Approved</p>
-            </div>
-            <div className="px-3 py-1">
-              <p className="text-xl font-extrabold text-slate-300">{counts.rejected}</p>
-              <p className="text-[10px] font-medium text-purple-200 uppercase tracking-wider">Deactivated</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Action feedback */}
-      {actionError && (
-        <div role="alert" className="rounded-xl bg-red-50 p-4 text-xs font-medium text-red-700 border border-red-200 flex items-start gap-2">
-          <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
-          <span>{actionError}</span>
-        </div>
-      )}
-      {notice && (
-        <div role="status" className="rounded-xl bg-emerald-50 p-4 text-xs font-medium text-emerald-800 border border-emerald-200 flex items-start gap-2">
-          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 mt-0.5" />
-          <span>{notice}</span>
-        </div>
-      )}
-
-      {/* Filter and search controls */}
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          {(["all", "pending", "approved", "rejected"] as const).map((tab) => {
-            const label = tab === "all" ? "All Profiles" : tab === "pending" ? "Pending" : tab === "approved" ? "Approved Doctors" : "Deactivated";
-            const active = statusFilter === tab;
-            return (
-              <Button
-                key={tab}
-                type="button"
-                variant={active ? "default" : "outline"}
-                size="sm"
-                onClick={() => setStatusFilter(tab)}
-                className={`text-xs h-8 ${active ? "bg-purple-900 hover:bg-purple-800 text-white" : "border-slate-200 text-slate-700"}`}
-              >
-                {label}
-              </Button>
-            );
-          })}
-        </div>
-
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">
-              {statusFilter === "all" ? "All Doctor Profiles" : statusFilter === "pending" ? "Pending Reviews" : statusFilter === "approved" ? "Approved Active Doctors" : "Deactivated / Rejected Doctors"} ({filteredApplications.length})
-            </h2>
-            <p className="text-xs text-slate-500">
-              Manage physician credentials, active practice statuses, and appointments.
+            <p className="text-slate-300 text-sm max-w-xl">
+              Verify medical council licenses, registration numbers, and practice credentials before activating public bookings.
             </p>
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="relative w-full sm:w-64">
-              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-              <Input
-                placeholder="Search applicant or license…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 bg-white text-xs h-9"
-              />
-            </div>
-
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => void retryLoad()}
               disabled={loading}
-              className="text-xs h-9"
+              className="bg-white/10 text-white border-white/20 hover:bg-white/20 text-xs"
             >
-              <RefreshCw className={`h-3.5 w-3.5 mr-1 ${loading ? "animate-spin" : ""}`} />
-              Refresh
+              <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              Refresh Records
             </Button>
           </div>
+        </div>
+      </div>
+
+      {/* KPI Status Filter Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <button
+          type="button"
+          onClick={() => setStatusFilter("all")}
+          className={`rounded-2xl border p-4 text-left transition ${
+            statusFilter === "all" ? "border-purple-600 bg-purple-50/50 ring-2 ring-purple-600/20" : "border-slate-200 bg-white hover:border-slate-300"
+          }`}
+        >
+          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Records</p>
+          <p className="mt-1 text-2xl font-bold text-slate-900">{counts.total}</p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter("pending")}
+          className={`rounded-2xl border p-4 text-left transition ${
+            statusFilter === "pending" ? "border-amber-600 bg-amber-50/50 ring-2 ring-amber-600/20" : "border-slate-200 bg-white hover:border-slate-300"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-amber-700 uppercase tracking-wider">Pending Review</p>
+            {counts.pending > 0 && <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />}
+          </div>
+          <p className="mt-1 text-2xl font-bold text-amber-900">{counts.pending}</p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter("approved")}
+          className={`rounded-2xl border p-4 text-left transition ${
+            statusFilter === "approved" ? "border-emerald-600 bg-emerald-50/50 ring-2 ring-emerald-600/20" : "border-slate-200 bg-white hover:border-slate-300"
+          }`}
+        >
+          <p className="text-xs font-medium text-emerald-700 uppercase tracking-wider">Approved & Verified</p>
+          <p className="mt-1 text-2xl font-bold text-emerald-900">{counts.approved}</p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setStatusFilter("rejected")}
+          className={`rounded-2xl border p-4 text-left transition ${
+            statusFilter === "rejected" ? "border-slate-600 bg-slate-100 ring-2 ring-slate-400/20" : "border-slate-200 bg-white hover:border-slate-300"
+          }`}
+        >
+          <p className="text-xs font-medium text-slate-600 uppercase tracking-wider">Deactivated / Rejected</p>
+          <p className="mt-1 text-2xl font-bold text-slate-700">{counts.rejected}</p>
+        </button>
+      </div>
+
+      {notice && (
+        <div role="status" className="rounded-2xl bg-emerald-50 border border-emerald-200 p-4 text-xs font-semibold text-emerald-800 flex items-center gap-2">
+          <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {actionError && (
+        <div role="alert" className="rounded-2xl bg-red-50 border border-red-200 p-4 text-xs font-semibold text-red-800 flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 text-red-600 flex-shrink-0" />
+          <span>{actionError}</span>
+        </div>
+      )}
+
+      {/* Search Input Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+          <Input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by physician name, specialty, license number or email…"
+            className="pl-10 text-xs bg-white"
+          />
         </div>
       </div>
 
@@ -330,6 +353,8 @@ export function AdminDoctorApplications() {
         <section aria-label="Doctor applications" className="grid gap-6">
           {filteredApplications.map((application) => {
             const busy = activeAction?.id === application.id;
+            const isRejectPromptOpen = promptRejectApp?.id === application.id;
+
             return (
               <Card key={application.id} className="border-slate-200 shadow-xs">
                 <CardHeader className="pb-3 border-b border-slate-100">
@@ -351,23 +376,24 @@ export function AdminDoctorApplications() {
                           {application.name}
                         </CardTitle>
                         <CardDescription className="text-xs text-slate-500">
-                          {application.email} · Submitted on {new Date(application.submittedAt).toLocaleDateString()}
+                          {application.email} · Submitted on {new Date(application.submittedAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" })}
                         </CardDescription>
                       </div>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
                       {application.status === "approved" ? (
-                        <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">
-                          Approved Active Doctor
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-200">
+                          <ShieldCheck className="h-3 w-3 text-emerald-600" />
+                          Verified Doctor
                         </span>
                       ) : application.status === "rejected" ? (
-                        <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700 border border-slate-200">
-                          Deactivated / Rejected
+                        <span className="rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-800 border border-red-200">
+                          Rejected / Unapproved
                         </span>
                       ) : (
                         <span className="rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 border border-amber-200">
-                          Pending Approval
+                          Pending Verification
                         </span>
                       )}
 
@@ -380,31 +406,132 @@ export function AdminDoctorApplications() {
                     </div>
                   </div>
                 </CardHeader>
-                <CardContent className="pt-4 space-y-4">
-                  <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 text-xs">
-                    <Detail label="Specialty" value={application.specialty} />
-                    <Detail label="License Details" value={`${application.licenseNumber} (${application.licenseRegion})`} />
-                    {application.phone && <Detail label="Contact Phone" value={application.phone} />}
-                    {application.qualifications && <Detail label="Qualifications" value={application.qualifications} />}
-                    {application.yearsOfExperience != null && (
-                      <Detail label="Experience" value={`${application.yearsOfExperience} years`} />
-                    )}
-                    {application.consultationFeeInr != null && (
-                      <Detail label="Consultation Fee" value={`₹${application.consultationFeeInr.toLocaleString("en-IN")}`} />
-                    )}
-                    {application.clinicName && <Detail label="Clinic / Hospital" value={application.clinicName} />}
-                    {application.clinicAddress && (
-                      <div className="sm:col-span-2">
-                        <Detail label="Clinic Address" value={application.clinicAddress} />
-                      </div>
-                    )}
-                    <div className="sm:col-span-2">
-                      <Detail label="Professional Bio" value={application.bio || "No bio provided."} />
-                    </div>
-                  </dl>
 
-                  <div className="flex flex-wrap items-center gap-3 pt-3 border-t border-slate-100">
-                    {application.status === "pending" && (
+                <CardContent className="pt-4 space-y-4">
+                  {/* Rejection Reason display if rejected */}
+                  {application.status === "rejected" && application.rejectionReason && (
+                    <div className="rounded-xl border border-red-200 bg-red-50/70 p-3 text-xs text-red-900">
+                      <span className="font-bold">Rejection reason recorded:</span> {application.rejectionReason}
+                    </div>
+                  )}
+
+                  {/* Medical Credential Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50/80 p-3.5 rounded-2xl border border-slate-100 text-xs">
+                    <div>
+                      <span className="text-slate-400 font-medium block">Specialty</span>
+                      <span className="font-bold text-slate-800">{application.specialty}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 font-medium block">Registration / Council</span>
+                      <span className="font-bold text-slate-800">{application.licenseRegion}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 font-medium block">License Number</span>
+                      <span className="font-mono font-bold text-slate-900 bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                        {application.licenseNumber}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 font-medium block">Experience</span>
+                      <span className="font-bold text-slate-800">{application.yearsOfExperience ?? 0} Years</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-slate-600">
+                    <div>
+                      <span className="font-semibold text-slate-700">Qualifications: </span>
+                      <span>{application.qualifications || "Not specified"}</span>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-700">Consultation Fee: </span>
+                      <span>₹{application.consultationFeeInr?.toLocaleString("en-IN") ?? 500}</span>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-700">Contact Phone: </span>
+                      <span>{application.phone || "Not specified"}</span>
+                    </div>
+                  </div>
+
+                  {(application.clinicName || application.clinicAddress) && (
+                    <div className="text-xs text-slate-600 border-t border-slate-100 pt-3">
+                      <span className="font-semibold text-slate-700">Practice Location: </span>
+                      <span>{application.clinicName ? `${application.clinicName} — ` : ""}{application.clinicAddress || ""}</span>
+                    </div>
+                  )}
+
+                  {application.bio && (
+                    <p className="text-xs text-slate-500 bg-white p-2.5 rounded-xl border border-slate-100 italic">
+                      &ldquo;{application.bio}&rdquo;
+                    </p>
+                  )}
+
+                  {/* Inline Rejection Reason Form */}
+                  {isRejectPromptOpen && (
+                    <div className="rounded-xl border-2 border-red-300 bg-red-50 p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-red-950 uppercase tracking-wider">
+                          Rejection Reason (Required — shown to doctor)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPromptRejectApp(null);
+                            setRejectionReasonInput("");
+                            setRejectReasonError("");
+                          }}
+                          className="text-xs text-slate-500 hover:text-slate-800"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      <Input
+                        placeholder="e.g. Medical registration number not found on state council records; upload valid council certificate"
+                        value={rejectionReasonInput}
+                        onChange={(e) => setRejectionReasonInput(e.target.value)}
+                        className="text-xs bg-white border-red-200"
+                        disabled={busy}
+                      />
+                      {rejectReasonError && <p className="text-xs text-red-600 font-semibold">{rejectReasonError}</p>}
+                      <div className="flex justify-end gap-2 pt-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="text-xs"
+                          onClick={() => {
+                            setPromptRejectApp(null);
+                            setRejectionReasonInput("");
+                            setRejectReasonError("");
+                          }}
+                          disabled={busy}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="bg-red-700 hover:bg-red-800 text-white text-xs font-semibold"
+                          disabled={busy}
+                          onClick={() => {
+                            if (rejectionReasonInput.trim().length < 5) {
+                              setRejectReasonError("Please enter a clear rejection reason (minimum 5 characters).");
+                              return;
+                            }
+                            setRejectReasonError("");
+                            void decide(application, "rejected", rejectionReasonInput.trim());
+                            setPromptRejectApp(null);
+                            setRejectionReasonInput("");
+                          }}
+                        >
+                          {busy ? "Submitting…" : "Confirm Rejection"}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-wrap items-center justify-end gap-2.5 pt-3 border-t border-slate-100">
+                    {application.status === "pending" && !isRejectPromptOpen && (
                       <>
                         <Button
                           type="button"
@@ -414,30 +541,38 @@ export function AdminDoctorApplications() {
                           disabled={Boolean(activeAction)}
                         >
                           <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
-                          {busy && activeAction?.action === "approve" ? "Approving…" : "Approve Application"}
+                          {busy && activeAction?.action === "approve" ? "Approving…" : "Approve & Verify Doctor"}
                         </Button>
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
                           className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 text-xs"
-                          onClick={() => void decide(application, "rejected")}
+                          onClick={() => {
+                            setPromptRejectApp(application);
+                            setRejectionReasonInput("");
+                            setRejectReasonError("");
+                          }}
                           disabled={Boolean(activeAction)}
                         >
                           <XCircle className="h-3.5 w-3.5 mr-1.5" />
-                          {busy && activeAction?.action === "reject" ? "Rejecting…" : "Reject Application"}
+                          Reject with Reason
                         </Button>
                       </>
                     )}
 
-                    {application.status === "approved" && (
+                    {application.status === "approved" && !isRejectPromptOpen && (
                       <>
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
                           className="border-amber-300 text-amber-800 hover:bg-amber-50 font-semibold text-xs"
-                          onClick={() => void decide(application, "rejected")}
+                          onClick={() => {
+                            setPromptRejectApp(application);
+                            setRejectionReasonInput("Deactivated by administrator");
+                            setRejectReasonError("");
+                          }}
                           disabled={Boolean(activeAction)}
                           title="Safely deactivates doctor from new bookings while preserving medical history"
                         >
@@ -460,7 +595,7 @@ export function AdminDoctorApplications() {
                       </>
                     )}
 
-                    {application.status === "rejected" && (
+                    {application.status === "rejected" && !isRejectPromptOpen && (
                       <>
                         <Button
                           type="button"
@@ -493,15 +628,6 @@ export function AdminDoctorApplications() {
           })}
         </section>
       )}
-    </div>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</dt>
-      <dd className="mt-0.5 break-words font-medium text-slate-900">{value}</dd>
     </div>
   );
 }

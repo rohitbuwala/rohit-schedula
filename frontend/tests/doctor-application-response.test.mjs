@@ -28,7 +28,7 @@ describe("doctor application status response", () => {
     assert.equal(result?.status, "pending");
   });
 
-  it("parses a valid application response with extended fields", () => {
+  it("parses a valid application response with extended fields and rejectionReason", () => {
     const application = {
       id: "11111111-1111-4111-8111-111111111111",
       specialty: "Cardiology",
@@ -42,16 +42,18 @@ describe("doctor application status response", () => {
       clinicName: "City Medical Centre",
       clinicAddress: "123 Main Street, Mumbai",
       profilePhotoUrl: null,
-      status: "approved",
+      status: "rejected",
       submittedAt: "2026-10-28T10:00:00.000Z",
       reviewedAt: "2026-10-29T10:00:00.000Z",
+      rejectionReason: "Medical registration number not found on state council records.",
     };
     const result = parseDoctorApplicationResponseBody(JSON.stringify(application));
     assert.equal(result?.consultationFeeInr, 500);
     assert.equal(result?.yearsOfExperience, 10);
     assert.equal(result?.clinicName, "City Medical Centre");
     assert.equal(result?.phone, "+919876543210");
-    assert.equal(result?.profilePhotoUrl, null);
+    assert.equal(result?.status, "rejected");
+    assert.equal(result?.rejectionReason, "Medical registration number not found on state council records.");
   });
 
   it("rejects malformed non-empty JSON and invalid response shapes", () => {

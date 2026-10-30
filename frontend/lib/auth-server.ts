@@ -27,3 +27,34 @@ export function dashboardPath(role?: string) {
   if (role === "admin") return "/admin";
   return role === "doctor" ? "/doctor/dashboard" : "/patient/dashboard";
 }
+
+export async function getPostLoginRedirect(cookie?: string | null): Promise<string> {
+  const session = await getVerifiedSession();
+  if (!session) return "/login";
+  if (session.user.role === "admin") return "/admin";
+  if (session.user.role === "doctor") return "/doctor/dashboard";
+
+  // For patient accounts, check if they have a doctor application pending review
+  try {
+    const rawCookie = cookie ?? (await headers()).get("cookie");
+    if (rawCookie) {
+      const res = await fetch(`${authUrl}/api/doctor-applications/me`, {
+        headers: { cookie: rawCookie },
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.trim().length > 0) {
+          const app = JSON.parse(text);
+          if (app && (app.status === "pending" || app.status === "rejected")) {
+            return "/doctor/dashboard";
+          }
+        }
+      }
+    }
+  } catch {
+    // fallback to patient dashboard
+  }
+
+  return "/patient/dashboard";
+}

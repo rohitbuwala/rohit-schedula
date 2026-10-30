@@ -14,6 +14,7 @@ import {
   HeartPulse,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Sparkles,
   Stethoscope,
   User,
@@ -332,9 +333,15 @@ export function PatientOverview({ name }: PatientOverviewProps) {
                       <Clock className="h-3 w-3" />
                       Confirmed Appointment
                     </span>
-                    <CardTitle className="text-xl font-bold text-slate-900">
-                      Dr. {nextAppointment.doctor.name}
-                    </CardTitle>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <CardTitle className="text-xl font-bold text-slate-900">
+                        Dr. {nextAppointment.doctor.name}
+                      </CardTitle>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 border border-emerald-200">
+                        <ShieldCheck className="h-3 w-3 text-emerald-600" />
+                        Verified Doctor
+                      </span>
+                    </div>
                     <CardDescription className="text-xs font-semibold text-teal-700">
                       {nextAppointment.doctor.specialty}
                     </CardDescription>

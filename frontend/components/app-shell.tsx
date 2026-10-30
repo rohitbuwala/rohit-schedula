@@ -61,7 +61,6 @@ export function AppShell({ role, userName, children }: AppShellProps) {
           { label: "Dashboard Overview", href: "/patient/dashboard", icon: LayoutDashboard },
           { label: "Book Appointment", href: "/patient/book-appointment", icon: Calendar },
           { label: "My Profile", href: "/patient/profile", icon: User },
-          { label: "Apply as Doctor", href: "/patient/doctor-application", icon: Stethoscope },
         ]
       : role === "doctor"
       ? [
