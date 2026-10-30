@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthSessionGuard } from '../auth/auth-session.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
@@ -9,6 +9,7 @@ import { DoctorApprovedGuard } from '../doctors/doctor-approved.guard.js';
 import { AppointmentsService } from './appointments.service.js';
 import { appointmentBookingSchema } from './appointment-booking.schema.js';
 import { appointmentAvailabilityQuerySchema } from './appointment-availability.schema.js';
+import { appointmentRescheduleSchema } from './appointment-reschedule.schema.js';
 
 const idSchema = z.uuid();
 
@@ -54,5 +55,36 @@ export class AppointmentsController {
     const parsed = idSchema.safeParse(id);
     if (!parsed.success) throw new BadRequestException('Invalid appointment id.');
     return this.appointments.getMine(parsed.data, user);
+  }
+
+  @Patch(':id/cancel')
+  @Roles('patient', 'doctor')
+  cancel(@Param('id') id: string, @CurrentUser() user: AuthenticatedUser) {
+    const parsed = idSchema.safeParse(id);
+    if (!parsed.success) throw new BadRequestException('Invalid appointment id.');
+    return this.appointments.cancel(parsed.data, user);
+  }
+
+  @Patch(':id/reschedule')
+  @Roles('patient', 'doctor')
+  reschedule(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: unknown,
+  ) {
+    const parsedId = idSchema.safeParse(id);
+    if (!parsedId.success) throw new BadRequestException('Invalid appointment id.');
+    const parsedBody = appointmentRescheduleSchema.safeParse(body);
+    if (!parsedBody.success) throw new BadRequestException(parsedBody.error.flatten());
+    return this.appointments.reschedule(parsedId.data, user, parsedBody.data);
+  }
+
+  @Patch(':id/complete')
+  @Roles('doctor')
+  @UseGuards(DoctorApprovedGuard)
+  complete(@Param('id') id: string, @CurrentUser() doctor: AuthenticatedUser) {
+    const parsed = idSchema.safeParse(id);
+    if (!parsed.success) throw new BadRequestException('Invalid appointment id.');
+    return this.appointments.complete(parsed.data, doctor);
   }
 }

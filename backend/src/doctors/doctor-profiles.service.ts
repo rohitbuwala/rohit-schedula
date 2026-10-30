@@ -5,6 +5,43 @@ import { db } from '../db/database.js';
 import { doctorProfile, user } from '../db/schema.js';
 import { toPublicDoctorProfile, type DoctorApplicationInput } from './doctor-profile.schema.js';
 
+/** Columns selected for the admin application review list — includes private fields. */
+const adminApplicationColumns = {
+  id: doctorProfile.id,
+  userId: doctorProfile.userId,
+  name: user.name,
+  email: user.email,
+  specialty: doctorProfile.specialty,
+  licenseRegion: doctorProfile.licenseRegion,
+  licenseNumber: doctorProfile.licenseNumber,
+  bio: doctorProfile.bio,
+  phone: doctorProfile.phone,
+  qualifications: doctorProfile.qualifications,
+  yearsOfExperience: doctorProfile.yearsOfExperience,
+  consultationFeeInr: doctorProfile.consultationFeeInr,
+  clinicName: doctorProfile.clinicName,
+  clinicAddress: doctorProfile.clinicAddress,
+  profilePhotoUrl: doctorProfile.profilePhotoUrl,
+  status: doctorProfile.status,
+  submittedAt: doctorProfile.submittedAt,
+  reviewedAt: doctorProfile.reviewedAt,
+  reviewedBy: doctorProfile.reviewedBy,
+} as const;
+
+/** Columns exposed to the public listing and individual profile endpoint. */
+const publicProfileColumns = {
+  id: doctorProfile.id,
+  name: user.name,
+  specialty: doctorProfile.specialty,
+  bio: doctorProfile.bio,
+  qualifications: doctorProfile.qualifications,
+  yearsOfExperience: doctorProfile.yearsOfExperience,
+  consultationFeeInr: doctorProfile.consultationFeeInr,
+  clinicName: doctorProfile.clinicName,
+  clinicAddress: doctorProfile.clinicAddress,
+  profilePhotoUrl: doctorProfile.profilePhotoUrl,
+} as const;
+
 @Injectable()
 export class DoctorProfilesService {
   async isApproved(userId: string): Promise<boolean> {
@@ -32,13 +69,8 @@ export class DoctorProfilesService {
   }
 
   async listApplications(status: 'pending' | 'approved' | 'rejected' = 'pending') {
-    return db.select({
-      id: doctorProfile.id, userId: doctorProfile.userId, name: user.name, email: user.email,
-      specialty: doctorProfile.specialty, licenseRegion: doctorProfile.licenseRegion,
-      licenseNumber: doctorProfile.licenseNumber, bio: doctorProfile.bio,
-      status: doctorProfile.status, submittedAt: doctorProfile.submittedAt,
-      reviewedAt: doctorProfile.reviewedAt, reviewedBy: doctorProfile.reviewedBy,
-    }).from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
+    return db.select(adminApplicationColumns)
+      .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
       .where(eq(doctorProfile.status, status)).orderBy(desc(doctorProfile.submittedAt));
   }
 
@@ -63,7 +95,7 @@ export class DoctorProfilesService {
   }
 
   async listPublicProfiles() {
-    const profiles = await db.select({ id: doctorProfile.id, name: user.name, specialty: doctorProfile.specialty, bio: doctorProfile.bio })
+    const profiles = await db.select(publicProfileColumns)
       .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
       .where(and(eq(doctorProfile.status, 'approved'), eq(user.role, 'doctor')))
       .orderBy(doctorProfile.specialty);
@@ -71,21 +103,52 @@ export class DoctorProfilesService {
   }
 
   async getPublicProfile(id: string) {
-    const [profile] = await db.select({ id: doctorProfile.id, name: user.name, specialty: doctorProfile.specialty, bio: doctorProfile.bio })
+    const [profile] = await db.select(publicProfileColumns)
       .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
       .where(and(eq(doctorProfile.id, id), eq(doctorProfile.status, 'approved'), eq(user.role, 'doctor'))).limit(1);
     return profile ? toPublicDoctorProfile(profile) : null;
   }
 
   async getOwnApprovedProfile(userId: string) {
-    const [profile] = await db.select({ id: doctorProfile.id, userId: user.id, name: user.name, email: user.email, specialty: doctorProfile.specialty, licenseRegion: doctorProfile.licenseRegion, licenseNumber: doctorProfile.licenseNumber, bio: doctorProfile.bio })
-      .from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
+    const [profile] = await db.select({
+      id: doctorProfile.id,
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      specialty: doctorProfile.specialty,
+      licenseRegion: doctorProfile.licenseRegion,
+      licenseNumber: doctorProfile.licenseNumber,
+      bio: doctorProfile.bio,
+      phone: doctorProfile.phone,
+      qualifications: doctorProfile.qualifications,
+      yearsOfExperience: doctorProfile.yearsOfExperience,
+      consultationFeeInr: doctorProfile.consultationFeeInr,
+      clinicName: doctorProfile.clinicName,
+      clinicAddress: doctorProfile.clinicAddress,
+      profilePhotoUrl: doctorProfile.profilePhotoUrl,
+    }).from(doctorProfile).innerJoin(user, eq(user.id, doctorProfile.userId))
       .where(and(eq(user.id, userId), eq(doctorProfile.status, 'approved'), eq(user.role, 'doctor'))).limit(1);
     if (!profile) throw new NotFoundException('Approved doctor profile not found.');
     return profile;
   }
 
   private applicantView(profile: typeof doctorProfile.$inferSelect) {
-    return { id: profile.id, specialty: profile.specialty, licenseRegion: profile.licenseRegion, licenseNumber: profile.licenseNumber, bio: profile.bio, status: profile.status, submittedAt: profile.submittedAt, reviewedAt: profile.reviewedAt };
+    return {
+      id: profile.id,
+      specialty: profile.specialty,
+      licenseRegion: profile.licenseRegion,
+      licenseNumber: profile.licenseNumber,
+      bio: profile.bio,
+      phone: profile.phone,
+      qualifications: profile.qualifications,
+      yearsOfExperience: profile.yearsOfExperience,
+      consultationFeeInr: profile.consultationFeeInr,
+      clinicName: profile.clinicName,
+      clinicAddress: profile.clinicAddress,
+      profilePhotoUrl: profile.profilePhotoUrl,
+      status: profile.status,
+      submittedAt: profile.submittedAt,
+      reviewedAt: profile.reviewedAt,
+    };
   }
 }

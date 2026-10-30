@@ -11,7 +11,7 @@ describe("doctor application status response", () => {
     assert.equal(parseDoctorApplicationResponseBody("null"), null);
   });
 
-  it("parses a valid application response", () => {
+  it("parses a valid application response without extended fields", () => {
     const application = {
       id: "11111111-1111-4111-8111-111111111111",
       specialty: "Cardiology",
@@ -22,7 +22,36 @@ describe("doctor application status response", () => {
       submittedAt: "2026-10-28T10:00:00.000Z",
       reviewedAt: null,
     };
-    assert.deepEqual(parseDoctorApplicationResponseBody(JSON.stringify(application)), application);
+    const result = parseDoctorApplicationResponseBody(JSON.stringify(application));
+    assert.equal(result?.id, application.id);
+    assert.equal(result?.specialty, application.specialty);
+    assert.equal(result?.status, "pending");
+  });
+
+  it("parses a valid application response with extended fields", () => {
+    const application = {
+      id: "11111111-1111-4111-8111-111111111111",
+      specialty: "Cardiology",
+      licenseRegion: "MH",
+      licenseNumber: "MCI-12345",
+      bio: "Experienced cardiologist.",
+      phone: "+919876543210",
+      qualifications: "MBBS, MD",
+      yearsOfExperience: 10,
+      consultationFeeInr: 500,
+      clinicName: "City Medical Centre",
+      clinicAddress: "123 Main Street, Mumbai",
+      profilePhotoUrl: null,
+      status: "approved",
+      submittedAt: "2026-10-28T10:00:00.000Z",
+      reviewedAt: "2026-10-29T10:00:00.000Z",
+    };
+    const result = parseDoctorApplicationResponseBody(JSON.stringify(application));
+    assert.equal(result?.consultationFeeInr, 500);
+    assert.equal(result?.yearsOfExperience, 10);
+    assert.equal(result?.clinicName, "City Medical Centre");
+    assert.equal(result?.phone, "+919876543210");
+    assert.equal(result?.profilePhotoUrl, null);
   });
 
   it("rejects malformed non-empty JSON and invalid response shapes", () => {

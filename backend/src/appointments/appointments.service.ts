@@ -1,37 +1,51 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, eq, gt, lt } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
 import { appointment, doctorProfile, user } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
+import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { canAccessAppointment } from './appointment-access.js';
 import { createWithConflictHandling } from './appointment-conflict.js';
 import { getAvailableSlots } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
+import type { AppointmentRescheduleInput } from './appointment-reschedule.schema.js';
 import { randomUUID } from 'node:crypto';
 
 @Injectable()
 export class AppointmentsService {
-  constructor(private readonly doctors: DoctorProfilesService) {}
+  constructor(
+    private readonly doctors: DoctorProfilesService,
+    @Optional() private readonly scheduleService?: DoctorScheduleService,
+    @Optional() private readonly notifications?: NotificationsService,
+  ) {}
 
   async getAvailableSlots(patientId: string, input: AppointmentAvailabilityQuery) {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
     if (!doctor) throw new NotFoundException('Approved doctor not found.');
     if (doctor.userId === patientId) throw new ForbiddenException();
 
+    const scheduleConfig = this.scheduleService
+      ? await this.scheduleService.getScheduleConfigForProfile(input.doctorProfileId)
+      : {};
+
     const dayStart = new Date(`${input.date}T00:00:00.000Z`);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const busy = await db.select({ startsAt: appointment.startsAt, endsAt: appointment.endsAt, status: appointment.status })
       .from(appointment)
       .where(and(eq(appointment.doctorId, doctor.userId), eq(appointment.status, 'scheduled'), lt(appointment.startsAt, dayEnd), gt(appointment.endsAt, dayStart)));
+
+    const slots = getAvailableSlots(input.date, busy, new Date(), scheduleConfig);
+
     return {
       doctorProfileId: input.doctorProfileId,
       date: input.date,
-      timezone: 'UTC',
-      durationMinutes: 30,
-      slots: getAvailableSlots(input.date, busy).map(({ startsAt, endsAt }) => ({ startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() })),
+      timezone: scheduleConfig.timezone ?? 'UTC',
+      durationMinutes: scheduleConfig.slotDurationMinutes ?? 30,
+      slots: slots.map(({ startsAt, endsAt }) => ({ startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() })),
     };
   }
 
@@ -42,9 +56,42 @@ export class AppointmentsService {
 
     return createWithConflictHandling(async () => {
       const [created] = await db.insert(appointment).values({
-        id: randomUUID(), patientId, doctorId: doctor.userId,
-        startsAt: input.startsAt, endsAt: input.endsAt,
-      }).returning({ id: appointment.id, startsAt: appointment.startsAt, endsAt: appointment.endsAt, status: appointment.status });
+        id: randomUUID(),
+        patientId,
+        doctorId: doctor.userId,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+      }).returning({
+        id: appointment.id,
+        startsAt: appointment.startsAt,
+        endsAt: appointment.endsAt,
+        status: appointment.status,
+      });
+
+      if (this.notifications) {
+        const timeFormatted = new Intl.DateTimeFormat(undefined, {
+          dateStyle: 'medium',
+          timeStyle: 'short',
+          timeZone: 'UTC',
+        }).format(input.startsAt);
+
+        void this.notifications.createNotification({
+          userId: patientId,
+          title: 'Appointment Booked',
+          message: `Consultation confirmed for ${timeFormatted} UTC.`,
+          type: 'booking',
+          appointmentId: created.id,
+        });
+
+        void this.notifications.createNotification({
+          userId: doctor.userId,
+          title: 'New Patient Appointment',
+          message: `A new consultation has been scheduled for ${timeFormatted} UTC.`,
+          type: 'booking',
+          appointmentId: created.id,
+        });
+      }
+
       return created;
     });
   }
@@ -105,6 +152,190 @@ export class AppointmentsService {
       .where(and(eq(appointment.id, id), eq(appointment.doctorId, doctorId))).limit(1);
     if (!patient) throw new NotFoundException('Appointment not found.');
     return patient;
+  }
+
+  async reschedule(id: string, actor: AuthenticatedUser, input: AppointmentRescheduleInput) {
+    if (actor.role === 'doctor') {
+      await this.assertDoctorApproved(actor.role, actor.id);
+    } else if (actor.role !== 'patient') {
+      throw new ForbiddenException();
+    }
+
+    return db.transaction(async (tx) => {
+      const [record] = await tx.select().from(appointment)
+        .where(eq(appointment.id, id))
+        .for('update')
+        .limit(1);
+
+      if (!record || !canAccessAppointment(actor.role, actor.id, record)) {
+        throw new NotFoundException('Appointment not found.');
+      }
+
+      if (record.status !== 'scheduled') {
+        throw new ConflictException(`Cannot reschedule an appointment that is already ${record.status}.`);
+      }
+
+      if (
+        record.startsAt.getTime() === input.startsAt.getTime() &&
+        record.endsAt.getTime() === input.endsAt.getTime()
+      ) {
+        return record;
+      }
+
+      const durationMs = input.endsAt.getTime() - input.startsAt.getTime();
+      if (durationMs !== 30 * 60 * 1000) {
+        throw new BadRequestException('Appointment duration must be exactly 30 minutes.');
+      }
+
+      try {
+        const [updated] = await tx.update(appointment)
+          .set({
+            startsAt: input.startsAt,
+            endsAt: input.endsAt,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(appointment.id, id), eq(appointment.status, 'scheduled')))
+          .returning({
+            id: appointment.id,
+            patientId: appointment.patientId,
+            doctorId: appointment.doctorId,
+            startsAt: appointment.startsAt,
+            endsAt: appointment.endsAt,
+            status: appointment.status,
+            updatedAt: appointment.updatedAt,
+          });
+
+        if (!updated) {
+          throw new ConflictException('Appointment changed concurrently; please refresh.');
+        }
+
+        if (this.notifications) {
+          const timeFormatted = new Intl.DateTimeFormat(undefined, {
+            dateStyle: 'medium',
+            timeStyle: 'short',
+            timeZone: 'UTC',
+          }).format(input.startsAt);
+
+          void this.notifications.createNotification({
+            userId: record.patientId,
+            title: 'Appointment Rescheduled',
+            message: `Your appointment has been rescheduled to ${timeFormatted} UTC.`,
+            type: 'reschedule',
+            appointmentId: id,
+          });
+
+          void this.notifications.createNotification({
+            userId: record.doctorId,
+            title: 'Appointment Rescheduled',
+            message: `Consultation rescheduled to ${timeFormatted} UTC.`,
+            type: 'reschedule',
+            appointmentId: id,
+          });
+        }
+
+        return updated;
+      } catch (err: unknown) {
+        if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === '23P01') {
+          throw new ConflictException('The selected doctor already has a scheduled appointment in that time slot.');
+        }
+        throw err;
+      }
+    });
+  }
+
+  async cancel(id: string, actor: AuthenticatedUser) {
+    if (actor.role === 'doctor') {
+      await this.assertDoctorApproved(actor.role, actor.id);
+    } else if (actor.role !== 'patient') {
+      throw new ForbiddenException();
+    }
+
+    return db.transaction(async (tx) => {
+      const [record] = await tx.select().from(appointment)
+        .where(eq(appointment.id, id))
+        .for('update')
+        .limit(1);
+
+      if (!record || !canAccessAppointment(actor.role, actor.id, record)) {
+        throw new NotFoundException('Appointment not found.');
+      }
+
+      if (record.status !== 'scheduled') {
+        throw new ConflictException(`Cannot cancel an appointment that is already ${record.status}.`);
+      }
+
+      const [updated] = await tx.update(appointment)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(and(eq(appointment.id, id), eq(appointment.status, 'scheduled')))
+        .returning({ id: appointment.id, status: appointment.status, updatedAt: appointment.updatedAt });
+
+      if (!updated) {
+        throw new ConflictException('Appointment changed concurrently; please refresh.');
+      }
+
+      if (this.notifications) {
+        void this.notifications.createNotification({
+          userId: record.patientId,
+          title: 'Appointment Cancelled',
+          message: 'Appointment was cancelled and the time slot was released.',
+          type: 'cancellation',
+          appointmentId: id,
+        });
+
+        void this.notifications.createNotification({
+          userId: record.doctorId,
+          title: 'Appointment Cancelled',
+          message: 'A patient consultation was cancelled and the slot was released.',
+          type: 'cancellation',
+          appointmentId: id,
+        });
+      }
+
+      return updated;
+    });
+  }
+
+  async complete(id: string, actor: AuthenticatedUser) {
+    if (actor.role !== 'doctor') {
+      throw new ForbiddenException('Only doctors can complete appointments.');
+    }
+    await this.assertDoctorApproved(actor.role, actor.id);
+
+    return db.transaction(async (tx) => {
+      const [record] = await tx.select().from(appointment)
+        .where(eq(appointment.id, id))
+        .for('update')
+        .limit(1);
+
+      if (!record || record.doctorId !== actor.id) {
+        throw new NotFoundException('Appointment not found.');
+      }
+
+      if (record.status !== 'scheduled') {
+        throw new ConflictException(`Cannot complete an appointment that is ${record.status}.`);
+      }
+
+      const [updated] = await tx.update(appointment)
+        .set({ status: 'completed', updatedAt: new Date() })
+        .where(and(eq(appointment.id, id), eq(appointment.status, 'scheduled')))
+        .returning({ id: appointment.id, status: appointment.status, updatedAt: appointment.updatedAt });
+
+      if (!updated) {
+        throw new ConflictException('Appointment changed concurrently; please refresh.');
+      }
+
+      if (this.notifications) {
+        void this.notifications.createNotification({
+          userId: record.patientId,
+          title: 'Consultation Completed',
+          message: 'Your consultation has concluded. We hope you had a great care experience.',
+          type: 'completion',
+          appointmentId: id,
+        });
+      }
+
+      return updated;
+    });
   }
 
   private async assertDoctorApproved(role: UserRole, userId: string): Promise<void> {

@@ -10,11 +10,12 @@ export function createAuth(database: AuthDatabase) {
   const env = loadEnv();
 
   return betterAuth({
-    appName: 'Rohit Schedula',
+    appName: 'Medrella',
     baseURL: env.betterAuthUrl,
     secret: env.betterAuthSecret,
     trustedOrigins: [
       env.frontendUrl,
+      'https://rohit-schedula.vercel.app',
       'https://rohit-schedula-*-rohit-buwalas-projects.vercel.app',
     ],
     database,

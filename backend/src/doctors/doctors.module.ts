@@ -6,11 +6,24 @@ import { AdminDoctorApplicationsController, DoctorApplicationsController } from 
 import { DoctorApprovedGuard } from './doctor-approved.guard.js';
 import { DoctorsController } from './doctors.controller.js';
 import { DoctorProfilesService } from './doctor-profiles.service.js';
+import { DoctorScheduleController } from './doctor-schedule.controller.js';
+import { DoctorScheduleService } from './doctor-schedule.service.js';
 
 @Module({
   imports: [AuthModule],
-  controllers: [DoctorsController, DoctorApplicationsController, AdminDoctorApplicationsController],
-  providers: [AuthSessionGuard, RolesGuard, DoctorProfilesService, DoctorApprovedGuard],
-  exports: [DoctorProfilesService, DoctorApprovedGuard],
+  controllers: [
+    DoctorsController,
+    DoctorApplicationsController,
+    AdminDoctorApplicationsController,
+    DoctorScheduleController,
+  ],
+  providers: [
+    AuthSessionGuard,
+    RolesGuard,
+    DoctorProfilesService,
+    DoctorApprovedGuard,
+    DoctorScheduleService,
+  ],
+  exports: [DoctorProfilesService, DoctorApprovedGuard, DoctorScheduleService],
 })
 export class DoctorsModule {}
