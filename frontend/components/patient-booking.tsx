@@ -15,6 +15,7 @@ import {
   HeartPulse,
   Info,
   Search,
+  ShieldCheck,
   Sparkles,
   Stethoscope,
 } from "lucide-react";
@@ -440,6 +441,10 @@ export function PatientBooking({ name }: { name?: string }) {
                           <h3 className="text-sm font-bold text-slate-900 truncate">
                             {doctor.name}
                           </h3>
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 border border-emerald-200">
+                            <ShieldCheck className="h-3 w-3 text-emerald-600" />
+                            Verified Doctor
+                          </span>
                           <span className="inline-block text-[11px] font-semibold text-teal-700">
                             {doctor.specialty}
                           </span>
@@ -517,7 +522,13 @@ export function PatientBooking({ name }: { name?: string }) {
               {selectedDoctorData ? (
                 <div className="rounded-xl border border-teal-200 bg-teal-50/40 p-3.5 space-y-1 text-xs">
                   <div className="flex items-center justify-between">
-                    <span className="font-bold text-teal-900 text-sm">{selectedDoctorData.name}</span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-teal-900 text-sm">{selectedDoctorData.name}</span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 border border-emerald-200">
+                        <ShieldCheck className="h-3 w-3 text-emerald-600" />
+                        Verified Doctor
+                      </span>
+                    </div>
                     <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800">
                       Active Selection
                     </span>

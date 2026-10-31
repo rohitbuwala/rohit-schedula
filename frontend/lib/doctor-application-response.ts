@@ -17,6 +17,7 @@ export const doctorApplicationResponseSchema = z.object({
   status: z.enum(["pending", "approved", "rejected"]),
   submittedAt: z.string(),
   reviewedAt: z.string().nullable(),
+  rejectionReason: z.string().nullable().optional(),
 });
 
 export type DoctorApplicationResponse = z.infer<typeof doctorApplicationResponseSchema>;

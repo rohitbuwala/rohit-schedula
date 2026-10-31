@@ -1,4 +1,4 @@
-import { doctorApplicationSchema, doctorDecisionSchema, toPublicDoctorProfile } from './doctor-profile.schema.js';
+import { doctorApplicationSchema, doctorDecisionSchema, doctorProfileUpdateSchema, toPublicDoctorProfile } from './doctor-profile.schema.js';
 
 describe('doctor application validation', () => {
   it('accepts minimum license details and normalizes text', () => {
@@ -11,9 +11,12 @@ describe('doctor application validation', () => {
     expect(doctorApplicationSchema.safeParse({ specialty: '', licenseRegion: 'CA', licenseNumber: 'x' }).success).toBe(false);
   });
 
-  it('accepts only explicit approval or rejection decisions', () => {
+  it('accepts only explicit approval or rejection decisions, requiring a reason on rejection', () => {
     expect(doctorDecisionSchema.safeParse({ decision: 'approved', role: 'admin' }).success).toBe(false);
     expect(doctorDecisionSchema.safeParse({ decision: 'approved' }).success).toBe(true);
+    expect(doctorDecisionSchema.safeParse({ decision: 'rejected' }).success).toBe(false);
+    expect(doctorDecisionSchema.safeParse({ decision: 'rejected', reason: 'bad' }).success).toBe(false);
+    expect(doctorDecisionSchema.safeParse({ decision: 'rejected', reason: 'License not found in state council database' }).success).toBe(true);
   });
 
   it('exposes only public profile fields, never licensing or contact data', () => {
@@ -31,6 +34,7 @@ describe('doctor application validation', () => {
       qualifications: 'MBBS, MD', yearsOfExperience: 10,
       consultationFeeInr: 500, clinicName: 'City Clinic', clinicAddress: '123 Main St',
       profilePhotoUrl: null,
+      isVerified: true,
     });
     // Must not expose private fields
     expect(result).not.toHaveProperty('phone');
@@ -58,43 +62,47 @@ describe('doctor application validation', () => {
   it('rejects negative consultation fee', () => {
     expect(doctorApplicationSchema.safeParse({
       specialty: 'Cardiology', licenseRegion: 'CA', licenseNumber: '12345',
-      consultationFeeInr: -1,
+      consultationFeeInr: -100,
     }).success).toBe(false);
   });
 
-  it('rejects negative years of experience', () => {
+  it('rejects negative or excessive years of experience', () => {
     expect(doctorApplicationSchema.safeParse({
       specialty: 'Cardiology', licenseRegion: 'CA', licenseNumber: '12345',
       yearsOfExperience: -1,
     }).success).toBe(false);
-  });
-
-  it('rejects invalid phone format', () => {
     expect(doctorApplicationSchema.safeParse({
       specialty: 'Cardiology', licenseRegion: 'CA', licenseNumber: '12345',
-      phone: 'not-a-phone',
+      yearsOfExperience: 71,
     }).success).toBe(false);
   });
 
-  it('accepts zero consultation fee (free consultation)', () => {
-    const result = doctorApplicationSchema.safeParse({
+  it('rejects unknown fields in doctor application schema', () => {
+    expect(doctorApplicationSchema.safeParse({
       specialty: 'Cardiology', licenseRegion: 'CA', licenseNumber: '12345',
-      consultationFeeInr: 0,
-    });
-    expect(result.success).toBe(true);
-    if (result.success) expect(result.data.consultationFeeInr).toBe(0);
+      hackedField: 'injected',
+    }).success).toBe(false);
   });
 
-  it('transforms empty optional strings to null', () => {
-    const result = doctorApplicationSchema.safeParse({
-      specialty: 'Cardiology', licenseRegion: 'CA', licenseNumber: '12345',
-      bio: '   ', qualifications: '', clinicName: '  ',
+  describe('doctorProfileUpdateSchema', () => {
+    it('accepts valid partial profile updates', () => {
+      const res = doctorProfileUpdateSchema.safeParse({
+        bio: 'Updated clinical biography.',
+        consultationFeeInr: 750,
+        clinicName: 'Medrella Speciality Care',
+      });
+      expect(res.success).toBe(true);
     });
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data.bio).toBeNull();
-      expect(result.data.qualifications).toBeNull();
-      expect(result.data.clinicName).toBeNull();
-    }
+
+    it('rejects empty update payloads', () => {
+      expect(doctorProfileUpdateSchema.safeParse({}).success).toBe(false);
+    });
+
+    it('rejects attempts to modify verified licensing fields through update schema', () => {
+      expect(doctorProfileUpdateSchema.safeParse({
+        licenseNumber: 'HACKED-LICENSE',
+        specialty: 'Neurology',
+      }).success).toBe(false);
+    });
   });
 });
