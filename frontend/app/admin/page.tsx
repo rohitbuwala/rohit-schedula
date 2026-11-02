@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { AdminDoctorApplications } from "@/components/admin-doctor-applications";
+import { AdminDashboard } from "@/components/admin-dashboard";
 import { AppShell } from "@/components/app-shell";
 import { getVerifiedSession } from "@/lib/auth-server";
 
@@ -14,7 +14,7 @@ export default async function AdminLandingPage() {
 
   return (
     <AppShell role="admin" userName={session.user.name}>
-      <AdminDoctorApplications />
+      <AdminDashboard />
     </AppShell>
   );
 }

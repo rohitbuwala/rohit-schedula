@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { z } from "zod";
 import {
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Building2,
@@ -11,16 +12,20 @@ import {
   CalendarCheck,
   CheckCircle2,
   Clock,
+  CreditCard,
   GraduationCap,
   HeartPulse,
   Info,
+  Loader2,
   Search,
   ShieldCheck,
   Sparkles,
   Stethoscope,
+  Timer,
 } from "lucide-react";
 import { backendUrl } from "@/lib/api";
 import { appointmentFormSchema } from "@/lib/appointment-validation";
+import { launchRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -39,6 +44,38 @@ type Doctor = {
 };
 
 type Slot = { startsAt: string; endsAt: string };
+
+type PaymentStep =
+  | "idle"
+  | "creating_hold"
+  | "creating_order"
+  | "checkout_open"
+  | "verifying"
+  | "success"
+  | "dismissed"
+  | "failed"
+  | "expired";
+
+interface ActiveHold {
+  appointmentId: string;
+  doctorProfileId: string;
+  doctorName: string;
+  specialty: string;
+  startsAt: string;
+  endsAt: string;
+  holdExpiresAt: string;
+  consultationFeeInr: number;
+}
+
+interface BookingConfirmed {
+  appointmentId: string;
+  paymentId: string;
+  doctorName: string;
+  specialty: string;
+  startsAt: string;
+  endsAt: string;
+  amountPaise: number;
+}
 
 const doctorsSchema = z.array(
   z.object({
@@ -82,9 +119,16 @@ export function PatientBooking({ name }: { name?: string }) {
   const [loadError, setLoadError] = useState("");
   const [slotError, setSlotError] = useState("");
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Active Hold & Payment states
+  const [activeHold, setActiveHold] = useState<ActiveHold | null>(null);
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
+  const [paymentStep, setPaymentStep] = useState<PaymentStep>("idle");
+  const [paymentError, setPaymentError] = useState("");
+  const [bookingConfirmed, setBookingConfirmed] = useState<BookingConfirmed | null>(null);
+  const [cancellingHold, setCancellingHold] = useState(false);
 
   const [currentTime] = useState(() => Date.now());
 
@@ -155,10 +199,195 @@ export function PatientBooking({ name }: { name?: string }) {
     };
   }, [selectedDoctor, date, refreshKey]);
 
+  // Active Hold Countdown Timer (10 minutes)
+  useEffect(() => {
+    if (!activeHold) return;
+
+    const checkExpiry = () => {
+      const remainingMs = new Date(activeHold.holdExpiresAt).getTime() - Date.now();
+      const diffSec = Math.max(0, Math.floor(remainingMs / 1000));
+      setSecondsRemaining(diffSec);
+
+      if (diffSec <= 0) {
+        setActiveHold(null);
+        setPaymentStep("expired");
+        setError("Your 10-minute appointment slot hold has expired. The slot has been released. Please select a time slot to try again.");
+        setSelectedSlot(null);
+        setRefreshKey((v) => v + 1);
+      }
+    };
+
+    checkExpiry();
+    const timer = setInterval(checkExpiry, 1000);
+    return () => clearInterval(timer);
+  }, [activeHold]);
+
+  function formatCountdown(totalSec: number) {
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+
+  async function triggerPayment(hold: ActiveHold) {
+    if (paymentStep === "checkout_open" || paymentStep === "verifying") return;
+
+    if (new Date(hold.holdExpiresAt).getTime() <= currentTime) {
+      setActiveHold(null);
+      setPaymentStep("expired");
+      setError("This appointment hold has expired. Please select a new slot.");
+      setRefreshKey((k) => k + 1);
+      return;
+    }
+
+    setPaymentStep("creating_order");
+    setPaymentError("");
+
+    try {
+      const orderRes = await fetch(`${backendUrl}/api/payments/create-order`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appointmentId: hold.appointmentId }),
+      });
+
+      if (!orderRes.ok) {
+        let msg = "Could not create payment order.";
+        try {
+          const errData = await orderRes.json();
+          if (typeof errData?.message === "string") msg = errData.message;
+        } catch {}
+
+        if (orderRes.status === 400 && msg.toLowerCase().includes("expired")) {
+          setActiveHold(null);
+          setPaymentStep("expired");
+          setError("Your appointment hold has expired. The slot has been released.");
+          setRefreshKey((k) => k + 1);
+          return;
+        }
+
+        setPaymentStep("failed");
+        setPaymentError(msg);
+        return;
+      }
+
+      const orderData: {
+        orderId: string;
+        amountPaise: number;
+        currency: string;
+        keyId: string;
+        appointmentId: string;
+      } = await orderRes.json();
+
+      setPaymentStep("checkout_open");
+
+      try {
+        const razorpayResponse = await launchRazorpayCheckout({
+          keyId: orderData.keyId,
+          orderId: orderData.orderId,
+          amountPaise: orderData.amountPaise,
+          currency: orderData.currency || "INR",
+          name: "Medrella Healthcare",
+          description: `Consultation with ${hold.doctorName}`,
+          prefill: {
+            name: name || undefined,
+          },
+          onDismiss: () => {
+            setPaymentStep("dismissed");
+          },
+          onError: (err) => {
+            console.error("Razorpay modal error:", err);
+          },
+        });
+
+        // Backend Cryptographic Verification
+        setPaymentStep("verifying");
+        const verifyRes = await fetch(`${backendUrl}/api/payments/verify`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            appointmentId: hold.appointmentId,
+            razorpayOrderId: razorpayResponse.razorpay_order_id,
+            razorpayPaymentId: razorpayResponse.razorpay_payment_id,
+            razorpaySignature: razorpayResponse.razorpay_signature,
+          }),
+        });
+
+        if (!verifyRes.ok) {
+          let verifyMsg = "Payment verification failed.";
+          try {
+            const vData = await verifyRes.json();
+            if (typeof vData?.message === "string") verifyMsg = vData.message;
+          } catch {}
+          setPaymentStep("failed");
+          setPaymentError(
+            `${verifyMsg} If your bank account was debited, our team will confirm your consultation automatically or process a refund.`
+          );
+          return;
+        }
+
+        const verifyResult: {
+          success: boolean;
+          paymentId?: string;
+        } = await verifyRes.json();
+
+        setActiveHold(null);
+        setPaymentStep("success");
+        setBookingConfirmed({
+          appointmentId: hold.appointmentId,
+          paymentId: verifyResult.paymentId || razorpayResponse.razorpay_payment_id,
+          doctorName: hold.doctorName,
+          specialty: hold.specialty,
+          startsAt: hold.startsAt,
+          endsAt: hold.endsAt,
+          amountPaise: orderData.amountPaise,
+        });
+        setSelectedSlot(null);
+        setRefreshKey((k) => k + 1);
+      } catch (checkoutErr) {
+        if (checkoutErr instanceof Error && checkoutErr.message === "PAYMENT_DISMISSED") {
+          setPaymentStep("dismissed");
+        } else {
+          setPaymentStep("failed");
+          setPaymentError(
+            checkoutErr instanceof Error
+              ? checkoutErr.message
+              : "Payment could not be completed. You can retry with your remaining slot hold."
+          );
+        }
+      }
+    } catch (orderErr) {
+      setPaymentStep("failed");
+      setPaymentError(orderErr instanceof Error ? orderErr.message : "Network error creating payment order.");
+    }
+  }
+
+  async function handleCancelHold() {
+    if (!activeHold) return;
+    setCancellingHold(true);
+    try {
+      await fetch(`${backendUrl}/api/appointments/${activeHold.appointmentId}/cancel`, {
+        method: "PATCH",
+        credentials: "include",
+      });
+      setActiveHold(null);
+      setPaymentStep("idle");
+      setPaymentError("");
+      setSelectedSlot(null);
+      setRefreshKey((v) => v + 1);
+    } catch {
+      setActiveHold(null);
+      setPaymentStep("idle");
+      setRefreshKey((v) => v + 1);
+    } finally {
+      setCancellingHold(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    setSuccess("");
+    setPaymentError("");
     setFieldErrors({});
 
     const parsed = appointmentFormSchema.safeParse({
@@ -176,6 +405,8 @@ export function PatientBooking({ name }: { name?: string }) {
     }
 
     setSubmitting(true);
+    setPaymentStep("creating_hold");
+
     try {
       const response = await fetch(`${backendUrl}/api/appointments`, {
         method: "POST",
@@ -217,25 +448,38 @@ export function PatientBooking({ name }: { name?: string }) {
         if (response.status === 403) throw new Error("Only patient accounts can book appointments.");
         if (response.status === 404) throw new Error(serverMessage || "The selected doctor could not be found.");
         if (response.status === 409) {
-          throw new Error(serverMessage || "The selected time slot is already booked. Please choose another slot.");
+          throw new Error(serverMessage || "The selected time slot is already booked or on hold. Please choose another slot.");
         }
         throw new Error(
           serverMessage || (response.status === 400 ? "Check the selected date and time." : "Booking failed. Please try again.")
         );
       }
 
-      const result: { startsAt: string } = await response.json();
-      const bookedAt = new Intl.DateTimeFormat("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-        timeZone: "Asia/Kolkata",
-      }).format(new Date(result.startsAt));
+      const result: {
+        id: string;
+        startsAt: string;
+        endsAt: string;
+        status: string;
+        holdExpiresAt: string;
+      } = await response.json();
 
-      setSuccess(`Appointment booked successfully for ${bookedAt} IST.`);
-      setSelectedSlot(null);
-      setRefreshKey((value) => value + 1);
+      const newHold: ActiveHold = {
+        appointmentId: result.id,
+        doctorProfileId: selectedDoctor,
+        doctorName: selectedDoctorData?.name || "Doctor",
+        specialty: selectedDoctorData?.specialty || "General Medicine",
+        startsAt: result.startsAt,
+        endsAt: result.endsAt,
+        holdExpiresAt: result.holdExpiresAt,
+        consultationFeeInr: selectedDoctorData?.consultationFeeInr ?? 500,
+      };
+
+      setActiveHold(newHold);
+      // Immediately trigger payment
+      void triggerPayment(newHold);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Booking failed. Please try again.");
+      setPaymentStep("idle");
     } finally {
       setSubmitting(false);
     }
@@ -296,6 +540,16 @@ export function PatientBooking({ name }: { name?: string }) {
     }
   }
 
+  function formatConfirmedDate(startsAt: string) {
+    return new Intl.DateTimeFormat("en-IN", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      timeZone: "Asia/Kolkata",
+    }).format(new Date(startsAt));
+  }
+
   return (
     <div className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-8 space-y-8">
       {/* Top Breadcrumb & Page Header */}
@@ -314,7 +568,7 @@ export function PatientBooking({ name }: { name?: string }) {
               Schedule a Consultation
             </h1>
             <p className="text-sm text-slate-500">
-              {name ? `Welcome, ${name}. ` : ""}Select an approved physician, inspect verified credentials, and book real-time consultation windows in Asia/Kolkata (IST).
+              {name ? `Welcome, ${name}. ` : ""}Select an approved physician, inspect verified credentials, and complete payment with instant 10-minute slot reservation.
             </p>
           </div>
           <Link
@@ -327,7 +581,109 @@ export function PatientBooking({ name }: { name?: string }) {
         </div>
       </div>
 
-      {/* Balanced Two-Column Booking Experience */}
+      {/* Booking Confirmed Full Banner Screen */}
+      {bookingConfirmed && (
+        <Card className="border-emerald-300 bg-gradient-to-br from-emerald-50/80 via-white to-teal-50/60 shadow-md overflow-hidden">
+          <CardHeader className="border-b border-emerald-100 bg-emerald-100/40 pb-4">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-xs">
+                <CheckCircle2 className="h-6 w-6" />
+              </div>
+              <div>
+                <CardTitle className="text-lg font-bold text-emerald-950">
+                  Consultation Confirmed & Payment Verified!
+                </CardTitle>
+                <CardDescription className="text-xs text-emerald-800">
+                  Your payment has been securely captured by Razorpay and your time slot is officially scheduled.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="p-6 space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div className="rounded-xl border border-emerald-200 bg-white p-4 space-y-2">
+                <p className="font-bold uppercase tracking-wider text-slate-400 text-[10px]">
+                  Consultation Summary
+                </p>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Physician:</span>
+                  <span className="font-bold text-slate-900">{bookingConfirmed.doctorName}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Specialty:</span>
+                  <span className="font-semibold text-teal-700">{bookingConfirmed.specialty}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Date:</span>
+                  <span className="font-semibold text-slate-900">{formatConfirmedDate(bookingConfirmed.startsAt)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Time Window:</span>
+                  <span className="font-semibold text-teal-800">
+                    {formatSlotDisplay(bookingConfirmed.startsAt, bookingConfirmed.endsAt)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-emerald-200 bg-white p-4 space-y-2">
+                <p className="font-bold uppercase tracking-wider text-slate-400 text-[10px]">
+                  Transaction & Receipt
+                </p>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Appointment ID:</span>
+                  <span className="font-mono text-[11px] text-slate-800 font-semibold truncate max-w-[200px]">
+                    {bookingConfirmed.appointmentId}
+                  </span>
+                </div>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Payment ID:</span>
+                  <span className="font-mono text-[11px] text-emerald-800 font-bold truncate max-w-[200px]">
+                    {bookingConfirmed.paymentId}
+                  </span>
+                </div>
+                <div className="flex justify-between border-b border-slate-100 pb-1.5">
+                  <span className="text-slate-500">Amount Paid:</span>
+                  <span className="font-bold text-slate-900 text-sm">
+                    ₹{(bookingConfirmed.amountPaise / 100).toLocaleString("en-IN")}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Status:</span>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-900">
+                    <ShieldCheck className="h-3 w-3" /> Captured & Confirmed
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <Link
+                href="/patient/dashboard"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold px-4 py-2 text-xs shadow-xs transition"
+              >
+                View in My Consultations
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setBookingConfirmed(null);
+                  setSelectedSlot(null);
+                  setError("");
+                  setPaymentError("");
+                }}
+                className="text-xs"
+              >
+                Schedule Another Consultation
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Main Two-Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Column: Doctor Discovery (7 Cols) */}
         <section aria-labelledby="doctor-search-heading" className="lg:col-span-7 space-y-5">
@@ -420,16 +776,17 @@ export function PatientBooking({ name }: { name?: string }) {
                 <div
                   key={doctor.id}
                   onClick={() => {
+                    if (activeHold) return; // Prevent changing doctor during active hold
                     setSelectedDoctor(doctor.id);
                     setError("");
-                    setSuccess("");
+                    setPaymentError("");
                     setFieldErrors({});
                   }}
                   className={`rounded-2xl text-left transition cursor-pointer border ${
                     isSelected
                       ? "ring-2 ring-teal-700 border-teal-700 bg-teal-50/30 shadow-md scale-[1.01]"
                       : "border-slate-200 bg-white hover:border-teal-300 hover:shadow-xs"
-                  }`}
+                  } ${activeHold ? "opacity-60 pointer-events-none" : ""}`}
                 >
                   <div className="p-4 sm:p-5 flex flex-col justify-between h-full space-y-3">
                     <div className="space-y-2.5">
@@ -502,14 +859,122 @@ export function PatientBooking({ name }: { name?: string }) {
           </div>
         </section>
 
-        {/* Right Column: Scheduling & Booking Review (5 Cols) */}
+        {/* Right Column: Scheduling & Payment (5 Cols) */}
         <section aria-labelledby="schedule-heading" className="lg:col-span-5 space-y-5 lg:sticky lg:top-24">
-          <Card className="border-slate-200 bg-white shadow-sm overflow-hidden">
+          {/* Active Hold Status Card */}
+          {activeHold && (
+            <Card className="border-amber-300 bg-gradient-to-br from-amber-50/90 to-orange-50/40 shadow-md relative overflow-hidden animate-in fade-in-50">
+              <div className="absolute top-0 right-0 h-20 w-20 bg-amber-200/40 rounded-bl-full pointer-events-none" />
+              <CardHeader className="pb-3 border-b border-amber-200/70">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Timer className="h-5 w-5 text-amber-700 animate-pulse" />
+                    <CardTitle className="text-sm font-bold text-amber-950">
+                      10-Minute Slot Hold Active
+                    </CardTitle>
+                  </div>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-200 px-2.5 py-0.5 text-xs font-bold text-amber-900 border border-amber-300">
+                    <Clock className="h-3.5 w-3.5" />
+                    {formatCountdown(secondsRemaining)}
+                  </span>
+                </div>
+                <CardDescription className="text-xs text-amber-800">
+                  This consultation slot is exclusively reserved for you. Complete payment before the timer expires.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-4 space-y-4 text-xs">
+                <div className="rounded-xl border border-amber-200 bg-white/80 p-3 space-y-1">
+                  <p className="font-semibold text-slate-900">Dr. {activeHold.doctorName}</p>
+                  <p className="text-teal-700 font-medium">{activeHold.specialty}</p>
+                  <p className="text-slate-600">
+                    {formatSlotDisplay(activeHold.startsAt, activeHold.endsAt)}
+                  </p>
+                  <div className="flex justify-between border-t border-slate-100 pt-1.5 font-bold">
+                    <span>Consultation Fee:</span>
+                    <span className="text-teal-900">₹{activeHold.consultationFeeInr}</span>
+                  </div>
+                </div>
+
+                {/* Payment Progress Indicators */}
+                {paymentStep === "checkout_open" && (
+                  <div className="rounded-xl bg-teal-50 border border-teal-200 p-3 text-teal-900 flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-teal-700 shrink-0" />
+                    <span>Razorpay checkout window is open. Complete payment in the popup.</span>
+                  </div>
+                )}
+
+                {paymentStep === "verifying" && (
+                  <div className="rounded-xl bg-teal-50 border border-teal-200 p-3 text-teal-900 flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-teal-700 shrink-0" />
+                    <span className="font-semibold">
+                      Cryptographically verifying payment with bank… Please wait.
+                    </span>
+                  </div>
+                )}
+
+                {paymentStep === "dismissed" && (
+                  <div className="rounded-xl bg-amber-100/70 border border-amber-300 p-3 text-amber-900 flex items-start gap-2">
+                    <Info className="h-4 w-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold">Checkout window was closed</p>
+                      <p className="text-[11px] mt-0.5">
+                        Your slot is still reserved. Click &quot;Complete Payment&quot; below to finish booking.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {paymentError && (
+                  <div role="alert" className="rounded-xl bg-red-50 border border-red-200 p-3 text-red-700 flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                    <p className="text-[11px] leading-relaxed">{paymentError}</p>
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="space-y-2 pt-1">
+                  <Button
+                    type="button"
+                    onClick={() => void triggerPayment(activeHold)}
+                    disabled={
+                      paymentStep === "checkout_open" ||
+                      paymentStep === "verifying" ||
+                      secondsRemaining <= 0
+                    }
+                    className="w-full bg-teal-700 hover:bg-teal-800 text-white font-bold h-10 rounded-xl shadow-xs transition"
+                  >
+                    {paymentStep === "verifying" ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Verifying…
+                      </>
+                    ) : (
+                      <>
+                        <CreditCard className="h-4 w-4 mr-2" /> Complete Payment (₹{activeHold.consultationFeeInr})
+                      </>
+                    )}
+                  </Button>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleCancelHold()}
+                    disabled={cancellingHold || paymentStep === "verifying"}
+                    className="w-full text-xs text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700 h-9"
+                  >
+                    {cancellingHold ? "Releasing slot…" : "Release Slot / Cancel Reservation"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Regular Booking Form Card */}
+          <Card className={`border-slate-200 bg-white shadow-sm overflow-hidden ${activeHold ? "opacity-50 pointer-events-none" : ""}`}>
             <CardHeader className="bg-gradient-to-r from-teal-50/50 to-white border-b border-slate-100 pb-4">
               <div className="flex items-center gap-2">
                 <Calendar className="h-5 w-5 text-teal-700" />
                 <CardTitle id="schedule-heading" className="text-base font-bold text-slate-900">
-                  Step 2 & 3: Select Date & Time
+                  Step 2 & 3: Select Date & Slot
                 </CardTitle>
               </div>
               <CardDescription className="text-xs text-slate-500">
@@ -567,10 +1032,10 @@ export function PatientBooking({ name }: { name?: string }) {
                       setSlots([]);
                       setSelectedSlot(null);
                       setSlotError("");
-                      setSuccess("");
                       setError("");
+                      setPaymentError("");
                     }}
-                    disabled={!selectedDoctor || loadingDoctors || Boolean(loadError)}
+                    disabled={!selectedDoctor || loadingDoctors || Boolean(loadError) || Boolean(activeHold)}
                     className="w-full bg-white text-xs h-10"
                   />
                   <p className="text-[11px] text-slate-400">
@@ -605,7 +1070,7 @@ export function PatientBooking({ name }: { name?: string }) {
 
                 {/* Slots Grid */}
                 {availableSlots.length > 0 && (
-                  <fieldset disabled={loadingSlots} className="space-y-2">
+                  <fieldset disabled={loadingSlots || Boolean(activeHold)} className="space-y-2">
                     <legend className="text-xs font-bold uppercase tracking-wider text-slate-700">
                       Available Consultation Windows (IST)
                     </legend>
@@ -621,7 +1086,7 @@ export function PatientBooking({ name }: { name?: string }) {
                             onClick={() => {
                               setSelectedSlot(slot);
                               setError("");
-                              setSuccess("");
+                              setPaymentError("");
                               setFieldErrors({});
                             }}
                             className={`min-h-11 rounded-xl border px-2.5 py-2 text-xs font-semibold text-center transition ${
@@ -683,36 +1148,8 @@ export function PatientBooking({ name }: { name?: string }) {
                 )}
                 {error && (
                   <div role="alert" className="rounded-xl bg-red-50 p-3.5 text-xs text-red-700 border border-red-200">
-                    <p className="font-semibold">Unable to book appointment</p>
+                    <p className="font-semibold">Unable to proceed</p>
                     <p className="mt-0.5">{error}</p>
-                  </div>
-                )}
-                {success && (
-                  <div role="status" className="rounded-xl bg-emerald-50 p-4 text-xs text-emerald-900 border border-emerald-200 space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-emerald-800">
-                      <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                      Consultation Successfully Scheduled!
-                    </div>
-                    <p>{success}</p>
-                    <div className="pt-2 flex flex-wrap gap-2">
-                      <Link
-                        href="/patient/dashboard"
-                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold px-3 py-1.5 text-xs shadow-xs transition"
-                      >
-                        Go to Dashboard Overview
-                        <ArrowRight className="h-3 w-3" />
-                      </Link>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSuccess("");
-                          setSelectedSlot(null);
-                        }}
-                        className="inline-flex items-center rounded-lg border border-emerald-300 bg-white hover:bg-emerald-50 text-emerald-800 font-semibold px-3 py-1.5 text-xs transition"
-                      >
-                        Book Another Slot
-                      </button>
-                    </div>
                   </div>
                 )}
 
@@ -721,16 +1158,29 @@ export function PatientBooking({ name }: { name?: string }) {
                   type="submit"
                   disabled={
                     submitting ||
+                    paymentStep === "creating_hold" ||
+                    paymentStep === "creating_order" ||
+                    paymentStep === "checkout_open" ||
+                    paymentStep === "verifying" ||
                     loadingDoctors ||
                     loadingSlots ||
                     Boolean(loadError) ||
                     Boolean(slotError) ||
                     !selectedDoctor ||
-                    !selectedSlot
+                    !selectedSlot ||
+                    Boolean(activeHold)
                   }
                   className="w-full bg-teal-700 hover:bg-teal-800 text-white font-bold h-11 rounded-xl shadow-xs transition"
                 >
-                  {submitting ? "Confirming booking…" : "Confirm Appointment Booking"}
+                  {submitting || paymentStep === "creating_hold" ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Reserving 10-Minute Hold…
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard className="h-4 w-4 mr-2" /> Proceed to Payment (₹{selectedDoctorData?.consultationFeeInr?.toLocaleString("en-IN") ?? 500})
+                    </>
+                  )}
                 </Button>
               </form>
             </CardContent>

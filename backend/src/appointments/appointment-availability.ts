@@ -11,6 +11,7 @@ export interface ExistingAppointment {
   startsAt: Date;
   endsAt: Date;
   status: AppointmentStatus;
+  holdExpiresAt?: Date | null;
 }
 
 export interface AppointmentSlot {
@@ -123,6 +124,17 @@ export function candidateSlotsForDate(
   return slots;
 }
 
+export function isAppointmentBusy(
+  existing: ExistingAppointment,
+  now = new Date()
+): boolean {
+  if (existing.status === 'scheduled') return true;
+  if (existing.status === 'pending_payment') {
+    return existing.holdExpiresAt ? existing.holdExpiresAt.getTime() > now.getTime() : true;
+  }
+  return false;
+}
+
 export function getAvailableSlots(
   date: string,
   appointments: ExistingAppointment[],
@@ -133,7 +145,7 @@ export function getAvailableSlots(
     (slot) =>
       !appointments.some(
         (existing) =>
-          existing.status === 'scheduled' &&
+          isAppointmentBusy(existing, now) &&
           slot.startsAt.getTime() < existing.endsAt.getTime() &&
           existing.startsAt.getTime() < slot.endsAt.getTime()
       )

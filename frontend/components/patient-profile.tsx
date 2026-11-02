@@ -59,6 +59,7 @@ export function PatientProfile() {
   const [bloodGroup, setBloodGroup] = useState("");
   const [address, setAddress] = useState("");
   const [allergies, setAllergies] = useState("");
+  const [now] = useState(() => Date.now());
 
   function populateForm(data: PatientProfileData) {
     setName(data.name || "");
@@ -180,7 +181,7 @@ export function PatientProfile() {
       timeZone: "Asia/Kolkata",
     });
     // Calculate approximate age
-    const diff = Date.now() - d.getTime();
+    const diff = now - d.getTime();
     const age = Math.floor(diff / (365.25 * 24 * 60 * 60 * 1000));
     return age >= 0 ? `${formatted} (${age} years old)` : formatted;
   }
