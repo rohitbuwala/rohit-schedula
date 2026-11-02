@@ -2,12 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertCircle,
   Calendar,
   CheckCircle2,
   Clock,
+  CreditCard,
   FileCheck2,
   ListOrdered,
   RefreshCw,
+  RotateCcw,
   User,
   XCircle,
 } from "lucide-react";
@@ -43,7 +46,7 @@ function formatTime(startsAt: string, endsAt: string): string {
   return `${start} – ${end} IST`;
 }
 
-function StatusBadge({ status }: { status: DoctorAppointment["status"] }) {
+function AppointmentStatusBadge({ status }: { status: DoctorAppointment["status"] }) {
   if (status === "scheduled") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700 border border-blue-200">
@@ -64,6 +67,85 @@ function StatusBadge({ status }: { status: DoctorAppointment["status"] }) {
     <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700 border border-slate-200">
       <XCircle className="h-3 w-3" />
       Cancelled
+    </span>
+  );
+}
+
+function PaymentStatusBadge({
+  payment,
+  appointmentStatus,
+}: {
+  payment?: DoctorAppointment["payment"];
+  appointmentStatus: DoctorAppointment["status"];
+}) {
+  const display = payment?.statusDisplay ?? (appointmentStatus === "pending_payment" ? "Payment Pending" : "Unpaid");
+
+  if (display === "Paid") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-300">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+        Paid
+      </span>
+    );
+  }
+
+  if (display === "Refunded") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-semibold text-sky-800 border border-sky-300">
+        <RotateCcw className="h-3 w-3 text-sky-600" />
+        Refunded
+      </span>
+    );
+  }
+
+  if (display === "Partially Refunded") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-semibold text-indigo-800 border border-indigo-300">
+        <RotateCcw className="h-3 w-3 text-indigo-600" />
+        Partially Refunded
+      </span>
+    );
+  }
+
+  if (display === "Refund Pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2.5 py-0.5 text-xs font-semibold text-purple-800 border border-purple-300">
+        <Clock className="h-3 w-3 text-purple-600" />
+        Refund Pending
+      </span>
+    );
+  }
+
+  if (display === "Refund Failed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-800 border border-rose-300">
+        <AlertCircle className="h-3 w-3 text-rose-600" />
+        Refund Failed
+      </span>
+    );
+  }
+
+  if (display === "Payment Failed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-800 border border-rose-300">
+        <AlertCircle className="h-3 w-3 text-rose-600" />
+        Payment Failed
+      </span>
+    );
+  }
+
+  if (display === "Payment Pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 border border-amber-300">
+        <CreditCard className="h-3 w-3 text-amber-600 animate-pulse" />
+        Payment Pending
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-slate-50 px-2.5 py-0.5 text-xs font-semibold text-slate-600 border border-slate-200">
+      {display}
     </span>
   );
 }
@@ -532,7 +614,10 @@ function DoctorAppointmentCard({
             <p className="text-sm font-bold text-slate-900">{appointment.patient.name}</p>
           </div>
         </div>
-        <StatusBadge status={appointment.status} />
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <AppointmentStatusBadge status={appointment.status} />
+          <PaymentStatusBadge payment={appointment.payment} appointmentStatus={appointment.status} />
+        </div>
       </div>
 
       <dl className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3 text-xs">
@@ -552,6 +637,16 @@ function DoctorAppointmentCard({
             {formatTime(appointment.startsAt, appointment.endsAt)}
           </dd>
         </div>
+        {appointment.payment && (
+          <div className="col-span-2 pt-1 border-t border-slate-50 flex items-center justify-between">
+            <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              Consultation Fee
+            </dt>
+            <dd className="font-bold text-slate-900">
+              ₹{(appointment.payment.amountPaise / 100).toFixed(2)}
+            </dd>
+          </div>
+        )}
       </dl>
 
       {!isPast && appointment.status === "scheduled" && (

@@ -40,7 +40,13 @@ async function bootstrap() {
 
   const server = app.getHttpAdapter().getInstance();
   registerAuthHandler(server);
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req: express.Request & { rawBody?: Buffer }, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
 
   await app.listen(env.port, '0.0.0.0');
 }

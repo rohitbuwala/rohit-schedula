@@ -2,10 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertCircle,
   Calendar,
   CheckCircle2,
   Clock,
+  CreditCard,
+  Loader2,
   RefreshCw,
+  RotateCcw,
   Search,
   Stethoscope,
   X,
@@ -16,6 +20,7 @@ import {
   parsePatientAppointmentsResponseBody,
   type PatientAppointment,
 } from "@/lib/appointment-response";
+import { launchRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -43,7 +48,13 @@ function formatTime(startsAt: string, endsAt: string): string {
   return `${start} – ${end} IST`;
 }
 
-function StatusBadge({ status }: { status: PatientAppointment["status"] }) {
+function AppointmentStatusBadge({
+  status,
+  isExpired = false,
+}: {
+  status: PatientAppointment["status"];
+  isExpired?: boolean;
+}) {
   if (status === "scheduled") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 px-2.5 py-0.5 text-xs font-semibold text-teal-800 border border-teal-200">
@@ -60,10 +71,105 @@ function StatusBadge({ status }: { status: PatientAppointment["status"] }) {
       </span>
     );
   }
+  if (status === "pending_payment") {
+    if (isExpired) {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600 border border-slate-200">
+          <XCircle className="h-3 w-3" />
+          Hold Expired
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 border border-amber-300">
+        <Clock className="h-3 w-3 text-amber-600 animate-pulse" />
+        Slot Reserved
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700 border border-slate-200">
       <XCircle className="h-3 w-3" />
       Cancelled
+    </span>
+  );
+}
+
+function PaymentStatusBadge({
+  payment,
+  appointmentStatus,
+}: {
+  payment?: PatientAppointment["payment"];
+  appointmentStatus: PatientAppointment["status"];
+}) {
+  const display = payment?.statusDisplay ?? (appointmentStatus === "pending_payment" ? "Payment Pending" : "Unpaid");
+
+  if (display === "Paid") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-800 border border-emerald-300">
+        <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+        Paid
+      </span>
+    );
+  }
+
+  if (display === "Refunded") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-semibold text-sky-800 border border-sky-300">
+        <RotateCcw className="h-3 w-3 text-sky-600" />
+        Refunded
+      </span>
+    );
+  }
+
+  if (display === "Partially Refunded") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-semibold text-indigo-800 border border-indigo-300">
+        <RotateCcw className="h-3 w-3 text-indigo-600" />
+        Partially Refunded
+      </span>
+    );
+  }
+
+  if (display === "Refund Pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-purple-50 px-2.5 py-0.5 text-xs font-semibold text-purple-800 border border-purple-300">
+        <Clock className="h-3 w-3 text-purple-600" />
+        Refund Pending
+      </span>
+    );
+  }
+
+  if (display === "Refund Failed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-800 border border-rose-300">
+        <AlertCircle className="h-3 w-3 text-rose-600" />
+        Refund Failed
+      </span>
+    );
+  }
+
+  if (display === "Payment Failed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-800 border border-rose-300">
+        <AlertCircle className="h-3 w-3 text-rose-600" />
+        Payment Failed
+      </span>
+    );
+  }
+
+  if (display === "Payment Pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800 border border-amber-300">
+        <CreditCard className="h-3 w-3 text-amber-600 animate-pulse" />
+        Payment Pending
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-slate-50 px-2.5 py-0.5 text-xs font-semibold text-slate-600 border border-slate-200">
+      {display}
     </span>
   );
 }
@@ -87,8 +193,14 @@ export function PatientAppointments({
   const [currentTime] = useState(() => Date.now());
 
   // Search and filter
-  const [filterStatus, setFilterStatus] = useState<"all" | "scheduled" | "completed" | "cancelled">("all");
+  const [filterStatus, setFilterStatus] = useState<
+    "all" | "scheduled" | "completed" | "cancelled" | "pending_payment"
+  >("all");
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Payment states
+  const [payingId, setPayingId] = useState<string | null>(null);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
 
   // Cancellation state
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
@@ -187,6 +299,87 @@ export function PatientAppointments({
     setRefreshTrigger((prev) => prev + 1);
   }
 
+  async function handlePayPending(appt: PatientAppointment) {
+    if (appt.holdExpiresAt && new Date(appt.holdExpiresAt).getTime() <= currentTime) {
+      setActionError("This appointment hold has expired. The slot has been released.");
+      handleManualRefresh();
+      return;
+    }
+
+    setPayingId(appt.id);
+    setActionError("");
+    setActionNotice("");
+
+    try {
+      const orderRes = await fetch(`${backendUrl}/api/payments/create-order`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appointmentId: appt.id }),
+      });
+
+      if (!orderRes.ok) {
+        let msg = "Could not initialize payment.";
+        try {
+          const errData = await orderRes.json();
+          if (typeof errData?.message === "string") msg = errData.message;
+        } catch {}
+        throw new Error(msg);
+      }
+
+      const orderData: {
+        orderId: string;
+        amountPaise: number;
+        currency: string;
+        keyId: string;
+      } = await orderRes.json();
+
+      const razorpayResponse = await launchRazorpayCheckout({
+        keyId: orderData.keyId,
+        orderId: orderData.orderId,
+        amountPaise: orderData.amountPaise,
+        currency: orderData.currency || "INR",
+        name: "Medrella Healthcare",
+        description: `Consultation with Dr. ${appt.doctor.name}`,
+      });
+
+      setVerifyingId(appt.id);
+
+      const verifyRes = await fetch(`${backendUrl}/api/payments/verify`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          appointmentId: appt.id,
+          razorpayOrderId: razorpayResponse.razorpay_order_id,
+          razorpayPaymentId: razorpayResponse.razorpay_payment_id,
+          razorpaySignature: razorpayResponse.razorpay_signature,
+        }),
+      });
+
+      if (!verifyRes.ok) {
+        let vMsg = "Payment verification failed.";
+        try {
+          const vData = await verifyRes.json();
+          if (typeof vData?.message === "string") vMsg = vData.message;
+        } catch {}
+        throw new Error(vMsg);
+      }
+
+      setActionNotice("Payment verified! Your consultation has been successfully scheduled.");
+      handleManualRefresh();
+    } catch (err) {
+      if (err instanceof Error && err.message === "PAYMENT_DISMISSED") {
+        setActionNotice("Payment window closed. Your slot remains reserved for the remaining hold time.");
+      } else {
+        setActionError(err instanceof Error ? err.message : "Payment failed. Please try again.");
+      }
+    } finally {
+      setPayingId(null);
+      setVerifyingId(null);
+    }
+  }
+
   async function handleConfirmCancel(id: string) {
     setCancellingId(id);
     setActionError("");
@@ -201,7 +394,7 @@ export function PatientAppointments({
       if (response.status === 404) throw new Error("Appointment not found or you do not have permission.");
       if (response.status === 409) throw new Error("This appointment is no longer scheduled or was already cancelled.");
       if (!response.ok) throw new Error("Could not cancel the appointment. Please try again.");
-      setActionNotice("Appointment was successfully cancelled and slot was released.");
+      setActionNotice("Appointment reservation was successfully cancelled and slot was released.");
       setConfirmingId(null);
       handleManualRefresh();
       onCancelled?.();
@@ -255,12 +448,20 @@ export function PatientAppointments({
     });
   }, [appointments, filterStatus, searchQuery]);
 
+  const pendingPayments = filteredAppointments
+    .filter((a) => a.status === "pending_payment" && a.holdExpiresAt && new Date(a.holdExpiresAt).getTime() > currentTime)
+    .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+
   const upcoming = filteredAppointments
     .filter((a) => a.status === "scheduled" && new Date(a.endsAt).getTime() >= currentTime)
     .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
 
   const pastAndOthers = filteredAppointments
-    .filter((a) => a.status !== "scheduled" || new Date(a.endsAt).getTime() < currentTime)
+    .filter(
+      (a) =>
+        (a.status !== "scheduled" && !(a.status === "pending_payment" && a.holdExpiresAt && new Date(a.holdExpiresAt).getTime() > currentTime)) ||
+        (a.status === "scheduled" && new Date(a.endsAt).getTime() < currentTime)
+    )
     .sort((a, b) => new Date(b.startsAt).getTime() - new Date(a.startsAt).getTime());
 
   return (
@@ -271,7 +472,7 @@ export function PatientAppointments({
             My Consultations & History
           </h2>
           <p className="mt-1 text-xs text-slate-500">
-            View upcoming visits, reschedule appointment times, or inspect completed consultations.
+            View upcoming visits, complete pending payments, reschedule appointment times, or inspect completed consultations.
           </p>
         </div>
 
@@ -311,6 +512,17 @@ export function PatientAppointments({
           }`}
         >
           All ({appointments.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setFilterStatus("pending_payment")}
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition ${
+            filterStatus === "pending_payment"
+              ? "bg-amber-600 text-white shadow-xs"
+              : "bg-white border border-slate-200 text-slate-600 hover:text-slate-900"
+          }`}
+        >
+          Pending Payment ({appointments.filter((a) => a.status === "pending_payment").length})
         </button>
         <button
           type="button"
@@ -392,6 +604,36 @@ export function PatientAppointments({
 
       {!loading && !error && appointments.length > 0 && (
         <div className="space-y-6">
+          {/* Pending Payment Consultations */}
+          {pendingPayments.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                <CreditCard className="h-4 w-4 text-amber-600" /> Pending Payment & Reserved Slots ({pendingPayments.length})
+              </h3>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {pendingPayments.map((appt) => (
+                  <AppointmentCard
+                    key={appt.id}
+                    appointment={appt}
+                    currentTime={currentTime}
+                    isPaying={payingId === appt.id}
+                    isVerifying={verifyingId === appt.id}
+                    isConfirming={confirmingId === appt.id}
+                    isCancelling={cancellingId === appt.id}
+                    onPay={() => void handlePayPending(appt)}
+                    onStartCancel={() => {
+                      setConfirmingId(appt.id);
+                      setReschedulingId(null);
+                      setActionError("");
+                    }}
+                    onCancelConfirm={() => void handleConfirmCancel(appt.id)}
+                    onCancelDismiss={() => setConfirmingId(null)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Upcoming Consultations */}
           {upcoming.length > 0 && (
             <div className="space-y-3">
@@ -403,6 +645,7 @@ export function PatientAppointments({
                   <AppointmentCard
                     key={appt.id}
                     appointment={appt}
+                    currentTime={currentTime}
                     isConfirming={confirmingId === appt.id}
                     isCancelling={cancellingId === appt.id}
                     isRescheduling={reschedulingId === appt.id}
@@ -439,11 +682,25 @@ export function PatientAppointments({
           {pastAndOthers.length > 0 && (
             <div className="space-y-3 pt-4 border-t border-slate-200">
               <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                <CheckCircle2 className="h-4 w-4" /> Past & Completed Visits ({pastAndOthers.length})
+                <CheckCircle2 className="h-4 w-4" /> Past & Concluded Consultations ({pastAndOthers.length})
               </h3>
               <div className="grid gap-4 sm:grid-cols-2">
                 {pastAndOthers.map((appt) => (
-                  <AppointmentCard key={appt.id} appointment={appt} isPast />
+                  <AppointmentCard
+                    key={appt.id}
+                    appointment={appt}
+                    currentTime={currentTime}
+                    isPast
+                    isConfirming={confirmingId === appt.id}
+                    isCancelling={cancellingId === appt.id}
+                    onStartCancel={() => {
+                      setConfirmingId(appt.id);
+                      setReschedulingId(null);
+                      setActionError("");
+                    }}
+                    onCancelConfirm={() => void handleConfirmCancel(appt.id)}
+                    onCancelDismiss={() => setConfirmingId(null)}
+                  />
                 ))}
               </div>
             </div>
@@ -456,7 +713,10 @@ export function PatientAppointments({
 
 function AppointmentCard({
   appointment,
+  currentTime,
   isPast = false,
+  isPaying = false,
+  isVerifying = false,
   isConfirming = false,
   isCancelling = false,
   isRescheduling = false,
@@ -465,6 +725,7 @@ function AppointmentCard({
   selectedRescheduleSlot = null,
   loadingRescheduleSlots = false,
   submittingReschedule = false,
+  onPay,
   onStartCancel,
   onCancelConfirm,
   onCancelDismiss,
@@ -475,7 +736,10 @@ function AppointmentCard({
   onRescheduleDismiss,
 }: {
   appointment: PatientAppointment;
+  currentTime: number;
   isPast?: boolean;
+  isPaying?: boolean;
+  isVerifying?: boolean;
   isConfirming?: boolean;
   isCancelling?: boolean;
   isRescheduling?: boolean;
@@ -484,6 +748,7 @@ function AppointmentCard({
   selectedRescheduleSlot?: Slot | null;
   loadingRescheduleSlots?: boolean;
   submittingReschedule?: boolean;
+  onPay?: () => void;
   onStartCancel?: () => void;
   onCancelConfirm?: () => void;
   onCancelDismiss?: () => void;
@@ -493,10 +758,18 @@ function AppointmentCard({
   onRescheduleConfirm?: () => void;
   onRescheduleDismiss?: () => void;
 }) {
+  const isPending = appointment.status === "pending_payment";
+  const isExpired = isPending && (!appointment.holdExpiresAt || new Date(appointment.holdExpiresAt).getTime() <= currentTime);
+  const isHoldActive = isPending && appointment.holdExpiresAt != null && new Date(appointment.holdExpiresAt).getTime() > currentTime;
+
   return (
     <div
       className={`rounded-2xl border p-5 transition ${
-        isPast ? "border-slate-200 bg-slate-50/60" : "border-slate-200 bg-white hover:border-teal-400 shadow-xs"
+        isHoldActive
+          ? "border-amber-300 bg-amber-50/40 shadow-xs"
+          : isPast
+          ? "border-slate-200 bg-slate-50/60"
+          : "border-slate-200 bg-white hover:border-teal-400 shadow-xs"
       }`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -509,7 +782,10 @@ function AppointmentCard({
             <p className="text-xs font-semibold text-teal-700">{appointment.doctor.specialty}</p>
           </div>
         </div>
-        <StatusBadge status={appointment.status} />
+        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 items-end">
+          <AppointmentStatusBadge status={appointment.status} isExpired={isExpired} />
+          <PaymentStatusBadge payment={appointment.payment} appointmentStatus={appointment.status} />
+        </div>
       </div>
 
       <dl className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3 text-xs">
@@ -525,6 +801,162 @@ function AppointmentCard({
         </div>
       </dl>
 
+      {/* Payment Details Section */}
+      {appointment.payment && (
+        <div className="mt-3 rounded-xl bg-slate-50 border border-slate-200/80 p-3 space-y-1.5 text-xs">
+          <div className="flex items-center justify-between text-slate-700">
+            <span className="text-[11px] font-semibold text-slate-500">Amount:</span>
+            <span className="font-bold text-slate-900">
+              ₹{(appointment.payment.amountPaise / 100).toFixed(2)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-slate-700">
+            <span className="text-[11px] font-semibold text-slate-500">Payment Method:</span>
+            <span className="text-slate-800 font-medium">
+              {appointment.payment.method ?? "Razorpay Online"}
+            </span>
+          </div>
+          {appointment.payment.razorpayPaymentId && (
+            <div className="flex items-center justify-between text-slate-700">
+              <span className="text-[11px] font-semibold text-slate-500">Payment ID:</span>
+              <span className="font-mono text-[11px] text-slate-600 select-all">
+                {appointment.payment.razorpayPaymentId}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Dedicated Refund Status Box for Cancelled Appointments */}
+      {appointment.status === "cancelled" && appointment.payment && (
+        <div className="mt-3 rounded-xl bg-sky-50/70 border border-sky-200 p-3 space-y-1.5 text-xs">
+          <div className="flex items-center gap-1.5 text-sky-950 font-bold">
+            <RotateCcw className="h-3.5 w-3.5 text-sky-700" />
+            <span>Refund Details</span>
+          </div>
+          <div className="flex items-center justify-between text-sky-900">
+            <span className="text-[11px] font-semibold text-sky-700">Refund Status:</span>
+            <span className="font-bold">
+              {appointment.payment.refund?.status === "processed" || appointment.payment.statusDisplay === "Refunded"
+                ? "Refund Processed"
+                : appointment.payment.refund?.status === "pending" || appointment.payment.statusDisplay === "Refund Pending"
+                ? "Refund Pending (Awaiting Bank Settlement)"
+                : appointment.payment.refund?.status === "failed" || appointment.payment.statusDisplay === "Refund Failed"
+                ? "Refund Failed"
+                : appointment.payment.statusDisplay}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-sky-900">
+            <span className="text-[11px] font-semibold text-sky-700">Refund Amount:</span>
+            <span className="font-bold text-emerald-700">
+              ₹{((appointment.payment.refund?.amountPaise ?? appointment.payment.refundedAmountPaise ?? appointment.payment.amountPaise) / 100).toFixed(2)}
+            </span>
+          </div>
+          {appointment.payment.refund?.arn && (
+            <div className="flex items-center justify-between text-sky-900">
+              <span className="text-[11px] font-semibold text-sky-700">Bank Reference (ARN):</span>
+              <span className="font-mono text-[11px] font-semibold text-slate-800 select-all">
+                {appointment.payment.refund.arn}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Pending Payment Card Actions */}
+      {!isPast && isPending && (
+        <div className="mt-4 border-t border-slate-100 pt-3 space-y-3">
+          {isConfirming && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 space-y-2">
+              <p className="text-xs font-bold text-red-900">Cancel this slot reservation?</p>
+              <p className="text-[11px] text-red-700">
+                This will release the reserved time slot for other patients.
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-7 text-xs bg-red-600 text-white hover:bg-red-700"
+                  disabled={isCancelling}
+                  onClick={onCancelConfirm}
+                >
+                  {isCancelling ? "Releasing…" : "Yes, release hold"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs border-slate-300"
+                  disabled={isCancelling}
+                  onClick={onCancelDismiss}
+                >
+                  Keep
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {!isConfirming && (
+            <div className="space-y-2">
+              {isHoldActive ? (
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-amber-800 flex items-center gap-1">
+                    <Clock className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
+                    10-Minute Hold Active
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 text-xs bg-teal-700 hover:bg-teal-800 text-white font-bold"
+                      disabled={isPaying || isVerifying}
+                      onClick={onPay}
+                    >
+                      {isVerifying ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Verifying…
+                        </>
+                      ) : isPaying ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Launching…
+                        </>
+                      ) : (
+                        <>
+                          <CreditCard className="h-3.5 w-3.5 mr-1.5" /> Pay Now
+                        </>
+                      )}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
+                      onClick={onStartCancel}
+                    >
+                      Cancel Hold
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-slate-500">Hold has expired. Slot was released.</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs border-slate-200 text-slate-600 hover:bg-slate-50"
+                    onClick={onStartCancel}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Scheduled Appointment Actions */}
       {!isPast && appointment.status === "scheduled" && (
         <div className="mt-4 border-t border-slate-100 pt-3 space-y-3">
           {/* Reschedule View */}

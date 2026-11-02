@@ -7,6 +7,9 @@ export interface AppEnvironment {
   betterAuthUrl: string;
   frontendUrl: string;
   port: number;
+  razorpayKeyId: string;
+  razorpayKeySecret: string;
+  razorpayWebhookSecret: string;
 }
 
 const databaseUrlSchema = z.url().refine((value) => ['postgres:', 'postgresql:'].includes(new URL(value).protocol));
@@ -20,6 +23,9 @@ const environmentSchema = z.object({
   FRONTEND_URL: webUrlSchema,
   BETTER_AUTH_SECRET: z.string().min(32),
   PORT: z.preprocess((value) => value ?? '5000', z.coerce.number().int().min(1).max(65535)),
+  RAZORPAY_KEY_ID: z.string().trim().min(1),
+  RAZORPAY_KEY_SECRET: z.string().trim().min(1),
+  RAZORPAY_WEBHOOK_SECRET: z.string().trim().min(1),
 });
 
 function parseEnvironment(input: unknown): z.infer<typeof environmentSchema> {
@@ -45,5 +51,8 @@ export function loadEnv(): AppEnvironment {
     betterAuthUrl: env.BETTER_AUTH_URL,
     frontendUrl: env.FRONTEND_URL,
     port: env.PORT,
+    razorpayKeyId: env.RAZORPAY_KEY_ID,
+    razorpayKeySecret: env.RAZORPAY_KEY_SECRET,
+    razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET,
   };
 }

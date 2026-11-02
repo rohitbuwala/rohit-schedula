@@ -3,8 +3,28 @@ import { sql } from 'drizzle-orm';
 
 export const userRole = pgEnum('user_role', ['patient', 'doctor', 'admin']);
 export const doctorProfileStatus = pgEnum('doctor_profile_status', ['pending', 'approved', 'rejected']);
-export const appointmentStatus = pgEnum('appointment_status', ['scheduled', 'cancelled', 'completed']);
+export const appointmentStatus = pgEnum('appointment_status', [
+  'pending_payment',
+  'scheduled',
+  'cancelled',
+  'completed',
+]);
 export type AppointmentStatus = typeof appointmentStatus.enumValues[number];
+
+export const paymentStatus = pgEnum('payment_status', [
+  'created',
+  'captured',
+  'failed',
+  'refunded',
+]);
+export type PaymentStatus = typeof paymentStatus.enumValues[number];
+
+export const refundStatus = pgEnum('refund_status', [
+  'pending',
+  'processed',
+  'failed',
+]);
+export type RefundStatus = typeof refundStatus.enumValues[number];
 
 export const user = pgTable('user', {
   id: text('id').primaryKey(),
@@ -87,11 +107,13 @@ export const appointment = pgTable('appointment', {
   startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
   endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
   status: appointmentStatus('status').notNull().default('scheduled'),
+  holdExpiresAt: timestamp('hold_expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index('appointment_patient_start_idx').on(table.patientId, table.startsAt),
   index('appointment_doctor_start_idx').on(table.doctorId, table.startsAt),
+  index('appointment_status_hold_idx').on(table.status, table.holdExpiresAt),
   check('appointment_distinct_participants_check', sql`${table.patientId} <> ${table.doctorId}`),
   check('appointment_time_order_check', sql`${table.endsAt} > ${table.startsAt}`),
 ]);
@@ -111,4 +133,67 @@ export const patientProfile = pgTable('patient_profile', {
   index('patient_profile_user_idx').on(table.userId),
 ]);
 
-export const schema = { user, session, account, verification, doctorProfile, appointment, patientProfile };
+export const payment = pgTable('payment', {
+  id: text('id').primaryKey(),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
+  patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  razorpayOrderId: text('razorpay_order_id').notNull().unique(),
+  razorpayPaymentId: text('razorpay_payment_id').unique(),
+  razorpaySignature: text('razorpay_signature'),
+  amountPaise: integer('amount_paise').notNull(),
+  currency: text('currency').notNull().default('INR'),
+  status: paymentStatus('status').notNull().default('created'),
+  receipt: text('receipt').notNull(),
+  failureReason: text('failure_reason'),
+  refundedAmountPaise: integer('refunded_amount_paise').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('payment_appointment_idx').on(table.appointmentId),
+  index('payment_patient_idx').on(table.patientId),
+  index('payment_doctor_idx').on(table.doctorId),
+  index('payment_status_idx').on(table.status),
+  index('payment_order_idx').on(table.razorpayOrderId),
+  check('payment_amount_positive_check', sql`${table.amountPaise} > 0`),
+  check('payment_refunded_amount_check', sql`${table.refundedAmountPaise} >= 0 and ${table.refundedAmountPaise} <= ${table.amountPaise}`),
+]);
+
+export const refund = pgTable('refund', {
+  id: text('id').primaryKey(),
+  paymentId: text('payment_id').notNull().references(() => payment.id, { onDelete: 'cascade' }),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
+  patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  razorpayPaymentId: text('razorpay_payment_id').notNull(),
+  razorpayRefundId: text('razorpay_refund_id').unique(),
+  amountPaise: integer('amount_paise').notNull(),
+  currency: text('currency').notNull().default('INR'),
+  status: refundStatus('status').notNull().default('pending'),
+  reason: text('reason').notNull(),
+  arn: text('arn'),
+  notes: text('notes'),
+  failureReason: text('failure_reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('refund_payment_idx').on(table.paymentId),
+  index('refund_appointment_idx').on(table.appointmentId),
+  index('refund_patient_idx').on(table.patientId),
+  index('refund_doctor_idx').on(table.doctorId),
+  index('refund_status_idx').on(table.status),
+  index('refund_razorpay_refund_idx').on(table.razorpayRefundId),
+  check('refund_amount_positive_check', sql`${table.amountPaise} > 0`),
+]);
+
+export const schema = {
+  user,
+  session,
+  account,
+  verification,
+  doctorProfile,
+  appointment,
+  patientProfile,
+  payment,
+  refund,
+};
