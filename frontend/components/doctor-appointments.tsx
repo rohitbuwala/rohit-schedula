@@ -290,7 +290,7 @@ export function DoctorAppointments() {
   return (
     <div className="space-y-6">
       {/* Clinic Workspace Metrics Bar */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 min-[375px]:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -350,14 +350,14 @@ export function DoctorAppointments() {
 
       {/* Main Workspace Tabs */}
       <div className="rounded-2xl border border-slate-200 bg-white shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 px-6 py-4 gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-200 px-4 py-4 gap-4 sm:px-6">
           <div className="flex items-center gap-2">
             <ListOrdered className="h-5 w-5 text-teal-700" />
             <h2 className="text-lg font-bold text-slate-900">Patient Consultation Queue</h2>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="flex items-center rounded-xl bg-slate-100 p-1">
+          <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-3">
+            <div className="flex flex-wrap items-center rounded-xl bg-slate-100 p-1">
               <button
                 type="button"
                 onClick={() => setActiveTab("queue")}
@@ -419,7 +419,7 @@ export function DoctorAppointments() {
         </div>
 
         {/* Tab Content */}
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {loading && (
             <div className="py-8 text-center text-xs text-slate-500">
               <RefreshCw className="h-5 w-5 text-teal-700 animate-spin mx-auto mb-2" />

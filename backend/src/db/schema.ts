@@ -1,4 +1,4 @@
-import { boolean, check, index, integer, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { boolean, check, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const userRole = pgEnum('user_role', ['patient', 'doctor', 'admin']);
@@ -108,6 +108,7 @@ export const appointment = pgTable('appointment', {
   endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
   status: appointmentStatus('status').notNull().default('scheduled'),
   holdExpiresAt: timestamp('hold_expires_at', { withTimezone: true }),
+  reminderGeneration: integer('reminder_generation').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -186,6 +187,70 @@ export const refund = pgTable('refund', {
   check('refund_amount_positive_check', sql`${table.amountPaise} > 0`),
 ]);
 
+export const emailOutbox = pgTable('email_outbox', {
+  id: text('id').primaryKey(),
+  eventKey: text('event_key').notNull(),
+  eventType: text('event_type').notNull(),
+  recipient: text('recipient').notNull(),
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+  appointmentId: text('appointment_id').references(() => appointment.id, { onDelete: 'set null' }),
+  paymentId: text('payment_id').references(() => payment.id, { onDelete: 'set null' }),
+  refundId: text('refund_id').references(() => refund.id, { onDelete: 'set null' }),
+  status: text('status').notNull().default('pending'),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+  firstAttemptAt: timestamp('first_attempt_at', { withTimezone: true }),
+  lastError: text('last_error'),
+  processingAt: timestamp('processing_at', { withTimezone: true }),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('email_outbox_event_key_unique').on(table.eventKey),
+  index('email_outbox_pending_idx').on(table.status, table.nextAttemptAt),
+  index('email_outbox_lease_idx').on(table.status, table.leaseExpiresAt),
+  index('email_outbox_retention_idx').on(table.status, table.sentAt, table.updatedAt),
+  check('email_outbox_event_type_check', sql`${table.eventType} in ('booking_confirmation', 'payment_receipt', 'appointment_cancelled', 'appointment_rescheduled', 'refund_processed')`),
+  check('email_outbox_status_check', sql`${table.status} in ('pending', 'processing', 'sent', 'dead')`),
+  check('email_outbox_attempt_count_check', sql`${table.attemptCount} >= 0`),
+]);
+
+export const appointmentReminder = pgTable('appointment_reminder', {
+  id: text('id').primaryKey(),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
+  recipientId: text('recipient_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  recipientEmail: text('recipient_email').notNull(),
+  recipientName: text('recipient_name').notNull(),
+  otherPartyName: text('other_party_name').notNull(),
+  intervalMinutes: integer('interval_minutes').notNull(),
+  appointmentStartsAt: timestamp('appointment_starts_at', { withTimezone: true }).notNull(),
+  generation: integer('generation').notNull(),
+  timezone: text('timezone').notNull(),
+  scheduledFor: timestamp('scheduled_for', { withTimezone: true }).notNull(),
+  status: text('status').notNull().default('pending'),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull(),
+  firstAttemptAt: timestamp('first_attempt_at', { withTimezone: true }),
+  lastError: text('last_error'),
+  processingAt: timestamp('processing_at', { withTimezone: true }),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('appointment_reminder_identity_unique').on(
+    table.appointmentId, table.recipientId, table.intervalMinutes, table.generation,
+  ),
+  index('appointment_reminder_due_idx').on(table.status, table.nextAttemptAt, table.scheduledFor),
+  index('appointment_reminder_lease_idx').on(table.status, table.leaseExpiresAt),
+  index('appointment_reminder_appointment_status_idx').on(table.appointmentId, table.status),
+  index('appointment_reminder_retention_idx').on(table.status, table.sentAt, table.updatedAt),
+  check('appointment_reminder_interval_check', sql`${table.intervalMinutes} in (60, 1440)`),
+  check('appointment_reminder_status_check', sql`${table.status} in ('pending', 'processing', 'sent', 'cancelled', 'dead')`),
+  check('appointment_reminder_attempt_count_check', sql`${table.attemptCount} >= 0`),
+]);
+
 export const schema = {
   user,
   session,
@@ -196,4 +261,6 @@ export const schema = {
   patientProfile,
   payment,
   refund,
+  emailOutbox,
+  appointmentReminder,
 };

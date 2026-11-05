@@ -1,143 +1,97 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { EmailEventPayload, EmailEventType } from './email-templates.js';
+import { renderEmailTemplate } from './email-templates.js';
 
-export interface SendEmailOptions {
-  to: string;
-  subject: string;
-  html: string;
-  text?: string;
-}
+export type EmailSendResult =
+  | { status: 'sent' }
+  | { status: 'disabled' }
+  | { status: 'retryable'; reason: string; ambiguous: boolean }
+  | { status: 'permanent_failure'; reason: string };
 
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
+  private warnedDisabled = false;
 
-  async sendEmail(options: SendEmailOptions): Promise<boolean> {
-    const apiKey = process.env.RESEND_API_KEY;
-    const fromAddress = process.env.EMAIL_FROM ?? 'Medrella Care <notifications@medrella.local>';
+  private getDeliverySettings(): { apiKey: string; from: string; mode: 'test' | 'production'; testRecipient?: string } | null {
+    // Never permit automated test processes to reach Resend, even if they inherit deployment credentials.
+    if (process.env.NODE_ENV === 'test') return null;
+    const mode = process.env.EMAIL_DELIVERY_MODE ?? 'disabled';
+    if (mode !== 'test' && mode !== 'production') return null;
+    if (mode === 'production' && process.env.NODE_ENV !== 'production') return null;
+    if (mode === 'test' && process.env.NODE_ENV === 'production') return null;
 
-    if (!apiKey) {
-      this.logger.log(
-        `[EmailService: Dev Simulation] Email to: ${options.to} | Subject: "${options.subject}"`
-      );
-      return true;
+    const apiKey = process.env.RESEND_API_KEY?.trim();
+    const from = process.env.EMAIL_FROM?.trim();
+    const testRecipient = process.env.EMAIL_TEST_RECIPIENT?.trim();
+    if (!apiKey || !from || (mode === 'test' && !testRecipient)) return null;
+    return { apiKey, from, mode, testRecipient };
+  }
+
+  isConfigured(): boolean {
+    return this.getDeliverySettings() !== null;
+  }
+
+  isTestMode(): boolean {
+    return this.getDeliverySettings()?.mode === 'test';
+  }
+
+  async sendEvent(
+    type: EmailEventType,
+    recipient: string,
+    payload: EmailEventPayload,
+    idempotencyKey: string,
+  ): Promise<EmailSendResult> {
+    const settings = this.getDeliverySettings();
+    if (type === 'appointment_reminder' && settings?.mode !== 'test') {
+      return { status: 'disabled' };
+    }
+    if (!settings) {
+      if (!this.warnedDisabled) {
+        this.logger.warn('Email delivery disabled: check EMAIL_DELIVERY_MODE, Resend credentials, and test recipient configuration.');
+        this.warnedDisabled = true;
+      }
+      return { status: 'disabled' };
     }
 
+    let message;
+    try {
+      message = renderEmailTemplate(type, payload);
+    } catch {
+      this.logger.error('Email template rendering failed; the event will not be sent.');
+      return { status: 'permanent_failure', reason: 'template_render_failure' };
+    }
     try {
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${settings.apiKey}`,
           'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
         },
         body: JSON.stringify({
-          from: fromAddress,
-          to: [options.to],
-          subject: options.subject,
-          html: options.html,
-          text: options.text,
+          from: settings.from,
+          to: [settings.mode === 'test' ? settings.testRecipient! : recipient],
+          subject: message.subject,
+          html: message.html,
+          text: message.text,
         }),
+        signal: AbortSignal.timeout(10_000),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        this.logger.warn(`Resend email delivery failed (${response.status}): ${errorText}`);
-        return false;
+      if (response.ok) return { status: 'sent' };
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        this.logger.warn(`Resend temporarily rejected an email (HTTP ${response.status}).`);
+        return { status: 'retryable', reason: `http_${response.status}`, ambiguous: false };
       }
-
-      this.logger.log(`Email successfully delivered to ${options.to}`);
-      return true;
-    } catch (err: unknown) {
-      this.logger.warn(
-        `Failed to send email to ${options.to}: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return false;
+      this.logger.warn(`Resend permanently rejected an email (HTTP ${response.status}).`);
+      return { status: 'permanent_failure', reason: `http_${response.status}` };
+    } catch (error: unknown) {
+      // A network timeout does not establish whether Resend accepted the request.
+      // The outbox retries with this same idempotency key and an unchanged payload.
+      const isTimeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      this.logger.warn(`Resend request ${isTimeout ? 'timed out' : 'failed before a response was received'}; delivery outcome may be unknown.`);
+      return { status: 'retryable', reason: isTimeout ? 'request_timeout' : 'network_error', ambiguous: true };
     }
-  }
-
-  async sendAppointmentBookedEmail(params: {
-    to: string;
-    patientName: string;
-    doctorName: string;
-    startsAt: Date;
-    timezone?: string;
-  }) {
-    const timeFormatted = new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'full',
-      timeStyle: 'short',
-      timeZone: params.timezone ?? 'UTC',
-    }).format(params.startsAt);
-
-    return this.sendEmail({
-      to: params.to,
-      subject: `Confirmed: Consultation with Dr. ${params.doctorName}`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
-          <h2 style="color: #0f766e;">Medrella Healthcare Confirmation</h2>
-          <p>Hello <strong>${params.patientName}</strong>,</p>
-          <p>Your appointment has been confirmed with <strong>Dr. ${params.doctorName}</strong>.</p>
-          <div style="background-color: #f0fdfa; border: 1px solid #ccfbf1; padding: 16px; border-radius: 8px;">
-            <p style="margin: 0;"><strong>Date & Time:</strong> ${timeFormatted} (${params.timezone ?? 'UTC'})</p>
-            <p style="margin: 8px 0 0 0;"><strong>Status:</strong> Scheduled</p>
-          </div>
-          <p style="font-size: 13px; color: #64748b; margin-top: 24px;">Need to reschedule or cancel? Log in to your Medrella Patient Portal.</p>
-        </div>
-      `,
-    });
-  }
-
-  async sendAppointmentRescheduledEmail(params: {
-    to: string;
-    recipientName: string;
-    otherPartyName: string;
-    startsAt: Date;
-    timezone?: string;
-  }) {
-    const timeFormatted = new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'full',
-      timeStyle: 'short',
-      timeZone: params.timezone ?? 'UTC',
-    }).format(params.startsAt);
-
-    return this.sendEmail({
-      to: params.to,
-      subject: `Rescheduled: Consultation with ${params.otherPartyName}`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
-          <h2 style="color: #0f766e;">Medrella Schedule Update</h2>
-          <p>Hello <strong>${params.recipientName}</strong>,</p>
-          <p>Your consultation with <strong>${params.otherPartyName}</strong> has been rescheduled.</p>
-          <div style="background-color: #f0fdfa; border: 1px solid #ccfbf1; padding: 16px; border-radius: 8px;">
-            <p style="margin: 0;"><strong>New Consultation Time:</strong> ${timeFormatted} (${params.timezone ?? 'UTC'})</p>
-          </div>
-        </div>
-      `,
-    });
-  }
-
-  async sendAppointmentCancelledEmail(params: {
-    to: string;
-    recipientName: string;
-    otherPartyName: string;
-    startsAt: Date;
-    timezone?: string;
-  }) {
-    const timeFormatted = new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'full',
-      timeStyle: 'short',
-      timeZone: params.timezone ?? 'UTC',
-    }).format(params.startsAt);
-
-    return this.sendEmail({
-      to: params.to,
-      subject: `Cancelled: Consultation with ${params.otherPartyName}`,
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
-          <h2 style="color: #dc2626;">Medrella Cancellation Notice</h2>
-          <p>Hello <strong>${params.recipientName}</strong>,</p>
-          <p>Your appointment with <strong>${params.otherPartyName}</strong> previously set for <strong>${timeFormatted}</strong> has been cancelled.</p>
-          <p>The time slot has been released. You may book another consultation window at any time through the Medrella portal.</p>
-        </div>
-      `,
-    });
   }
 }

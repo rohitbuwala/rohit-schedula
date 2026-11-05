@@ -350,6 +350,9 @@ describe('PaymentsService', () => {
     });
 
     it('successfully confirms payment, schedules appointment and emits notifications', async () => {
+      const reminderScheduler = { scheduleForAppointment: vi.fn().mockResolvedValue(4) };
+      const scheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
+      service = new PaymentsService(mockRazorpay, mockNotifications, undefined, scheduleService as never, reminderScheduler as never);
       const validSignature = createHmac('sha256', sampleSecret)
         .update(`${razorpayOrderId}|${razorpayPaymentId}`)
         .digest('hex');
@@ -360,6 +363,9 @@ describe('PaymentsService', () => {
         endsAt: new Date('2026-11-05T10:30:00+05:30'),
         status: 'scheduled',
         doctorId: 'doctor-1',
+        patientId,
+        updatedAt: new Date(),
+        reminderGeneration: 0,
       };
 
       const mockTx = {
@@ -435,6 +441,7 @@ describe('PaymentsService', () => {
       expect(result.status).toBe('captured');
       expect(mockRazorpay.payments.fetch).toHaveBeenCalledWith(razorpayPaymentId);
       expect(mockNotifications.createNotification).toHaveBeenCalledTimes(2); // patient & doctor
+      expect(reminderScheduler.scheduleForAppointment).toHaveBeenCalledWith(mockTx, expect.objectContaining({ reminderGeneration: 0 }), 'America/New_York');
     });
 
     it('safely handles late capture when slot was reassigned and queues a refund', async () => {
@@ -525,6 +532,10 @@ describe('PaymentsService', () => {
     });
 
     it('idempotently updates payment on payment.captured event', async () => {
+      const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      const mockScheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
+      const reminders = { scheduleForAppointment: vi.fn().mockResolvedValue(4) };
+      service = new PaymentsService(mockRazorpay, mockNotifications, mockEmailOutbox as never, mockScheduleService as never, reminders as never);
       const payload = {
         event: 'payment.captured',
         payload: {
@@ -577,6 +588,15 @@ describe('PaymentsService', () => {
                 }),
               }),
             }),
+          })
+          // 3. Fetch email recipients for transactional outbox enqueue
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockResolvedValueOnce([
+                { id: 'pat-1', name: 'Test Patient', email: 'patient@example.invalid' },
+                { id: 'doc-1', name: 'Test Doctor', email: 'doctor@example.invalid' },
+              ]),
+            }),
           }),
         update: vi
           .fn()
@@ -595,6 +615,9 @@ describe('PaymentsService', () => {
                     endsAt: new Date('2026-11-05T10:30:00Z'),
                     status: 'scheduled',
                     doctorId: 'doc-1',
+                    patientId: 'pat-1',
+                    updatedAt: new Date(),
+                    reminderGeneration: 0,
                   },
                 ]),
               }),
@@ -607,6 +630,36 @@ describe('PaymentsService', () => {
       const res = await service.handleWebhook(signature, rawBody, payload);
       expect(res.received).toBe(true);
       expect(res.status).toBe('captured');
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledTimes(3);
+      expect(reminders.scheduleForAppointment).toHaveBeenCalledWith(mockTx, expect.objectContaining({ reminderGeneration: 0 }), 'America/New_York');
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({ payload: expect.objectContaining({ timezone: 'America/New_York' }) }),
+      );
+      expect(mockNotifications.createNotification.mock.calls.map(([notification]) => notification.message).join(' ')).toContain('(America/New_York)');
+
+      const duplicateTx = {
+        select: vi.fn().mockReturnValue({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              for: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue([{
+                  id: 'pay-1',
+                  appointmentId: 'appt-1',
+                  patientId: 'pat-1',
+                  doctorId: 'doc-1',
+                  status: 'captured',
+                }]),
+              }),
+            }),
+          }),
+        }),
+      };
+      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(duplicateTx));
+      const duplicate = await service.handleWebhook(signature, rawBody, payload);
+      expect(duplicate.note).toBe('Already captured.');
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledTimes(3);
+      expect(reminders.scheduleForAppointment).toHaveBeenCalledTimes(1);
     });
 
     it('records failure description on payment.failed event', async () => {

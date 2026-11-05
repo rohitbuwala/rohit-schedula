@@ -10,6 +10,10 @@ export interface AppEnvironment {
   razorpayKeyId: string;
   razorpayKeySecret: string;
   razorpayWebhookSecret: string;
+  resendApiKey?: string;
+  emailFrom?: string;
+  emailDeliveryMode: 'disabled' | 'test' | 'production';
+  emailTestRecipient?: string;
 }
 
 const databaseUrlSchema = z.url().refine((value) => ['postgres:', 'postgresql:'].includes(new URL(value).protocol));
@@ -26,6 +30,10 @@ const environmentSchema = z.object({
   RAZORPAY_KEY_ID: z.string().trim().min(1),
   RAZORPAY_KEY_SECRET: z.string().trim().min(1),
   RAZORPAY_WEBHOOK_SECRET: z.string().trim().min(1),
+  RESEND_API_KEY: z.string().trim().min(1).optional(),
+  EMAIL_FROM: z.string().trim().min(1).optional(),
+  EMAIL_DELIVERY_MODE: z.enum(['disabled', 'test', 'production']).default('disabled'),
+  EMAIL_TEST_RECIPIENT: z.email().optional(),
 });
 
 function parseEnvironment(input: unknown): z.infer<typeof environmentSchema> {
@@ -54,5 +62,9 @@ export function loadEnv(): AppEnvironment {
     razorpayKeyId: env.RAZORPAY_KEY_ID,
     razorpayKeySecret: env.RAZORPAY_KEY_SECRET,
     razorpayWebhookSecret: env.RAZORPAY_WEBHOOK_SECRET,
+    resendApiKey: env.RESEND_API_KEY,
+    emailFrom: env.EMAIL_FROM,
+    emailDeliveryMode: env.EMAIL_DELIVERY_MODE,
+    emailTestRecipient: env.EMAIL_TEST_RECIPIENT,
   };
 }

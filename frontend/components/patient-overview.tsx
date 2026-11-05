@@ -232,7 +232,7 @@ export function PatientOverview({ name }: PatientOverviewProps) {
       )}
 
       {/* Summary KPI Cards */}
-      <section aria-labelledby="summary-kpis" className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <section aria-labelledby="summary-kpis" className="grid grid-cols-1 gap-4 min-[430px]:grid-cols-2 md:grid-cols-4">
         <Card className="border-slate-200 bg-white shadow-xs">
           <CardContent className="p-5 flex items-center gap-4">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-teal-50 text-teal-700 border border-teal-100">

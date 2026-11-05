@@ -38,6 +38,7 @@ describe('doctor schedule service', () => {
 
     const fetched = await service.getSchedule(doctorId);
     expect(fetched.timezone).toBe('America/New_York');
+    expect(await service.getTimezoneForDoctor(doctorId)).toBe('America/New_York');
   });
 
   it('adds and removes leave dates', async () => {

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, lt, lte, or } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lt, lte, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
 import { appointment, doctorProfile, payment, refund, user } from '../db/schema.js';
@@ -8,6 +8,9 @@ import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { PaymentReconciliationService } from '../payments/payment-reconciliation.service.js';
+import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox.service.js';
+import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
+import type { EmailEventType } from '../notifications/email-templates.js';
 import { canAccessAppointment } from './appointment-access.js';
 import { createWithConflictHandling } from './appointment-conflict.js';
 import { createZonedDate, getAvailableSlots, isBookableSlot } from './appointment-availability.js';
@@ -127,7 +130,45 @@ export class AppointmentsService {
     @Optional() private readonly notifications?: NotificationsService,
     @Optional() private readonly payments?: PaymentsService,
     @Optional() private readonly reconciliation?: PaymentReconciliationService,
+    @Optional() private readonly emailOutbox?: EmailOutboxService,
+    @Optional() private readonly appointmentReminders?: AppointmentReminderService,
   ) {}
+
+  private async enqueueAppointmentEmails(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    type: 'appointment_cancelled' | 'appointment_rescheduled',
+    record: { id: string; patientId: string; doctorId: string },
+    startsAt: Date,
+    eventSuffix: string,
+  ): Promise<void> {
+    if (!this.emailOutbox) return;
+    const participants = await tx.select({ id: user.id, name: user.name, email: user.email })
+      .from(user)
+      .where(inArray(user.id, [record.patientId, record.doctorId]));
+    const patient = participants.find((participant) => participant.id === record.patientId);
+    const doctor = participants.find((participant) => participant.id === record.doctorId);
+    if (!patient || !doctor) return;
+    const timezone = await this.scheduleService?.getTimezoneForDoctor(record.doctorId);
+
+    const recipients = [
+      { user: patient, otherPartyName: `Dr. ${doctor.name}` },
+      { user: doctor, otherPartyName: patient.name },
+    ];
+    for (const recipient of recipients) {
+      const eventType: EmailEventType = type;
+      await this.emailOutbox.enqueue(tx, {
+          eventKey: emailEventKey.appointment(type, record.id, eventSuffix, recipient.user.id),
+        eventType,
+        recipient: recipient.user.email,
+        appointmentId: record.id,
+        payload: {
+          recipientName: recipient.user.name,
+          otherPartyName: recipient.otherPartyName,
+          ...(timezone ? { startsAt: startsAt.toISOString(), timezone } : {}),
+        },
+      });
+    }
+  }
 
   async getAvailableSlots(patientId: string, input: AppointmentAvailabilityQuery) {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
@@ -764,6 +805,7 @@ export class AppointmentsService {
           .set({
             startsAt: input.startsAt,
             endsAt: input.endsAt,
+            reminderGeneration: sql`${appointment.reminderGeneration} + 1`,
             updatedAt: new Date(),
           })
           .where(and(eq(appointment.id, id), eq(appointment.status, 'scheduled')))
@@ -775,23 +817,41 @@ export class AppointmentsService {
             endsAt: appointment.endsAt,
             status: appointment.status,
             updatedAt: appointment.updatedAt,
+            reminderGeneration: appointment.reminderGeneration,
           });
 
         if (!updated) {
           throw new ConflictException('Appointment changed concurrently; please refresh.');
         }
 
+        await this.enqueueAppointmentEmails(
+          tx,
+          'appointment_rescheduled',
+          record,
+          updated.startsAt,
+          randomUUID(),
+        );
+
+        const reminderTimezone = await this.scheduleService?.getTimezoneForDoctor(record.doctorId) ?? 'Asia/Kolkata';
+        await this.appointmentReminders?.cancelForAppointment(tx, id);
+        await this.appointmentReminders?.scheduleForAppointment(tx, updated, reminderTimezone);
+
         if (this.notifications) {
-          const timeFormatted = new Intl.DateTimeFormat('en-IN', {
-            dateStyle: 'medium',
-            timeStyle: 'short',
-            timeZone: 'Asia/Kolkata',
-          }).format(input.startsAt);
+          const timezone = await this.scheduleService?.getTimezoneForDoctor(record.doctorId);
+          const timeFormatted = timezone
+            ? new Intl.DateTimeFormat('en-IN', {
+                dateStyle: 'medium',
+                timeStyle: 'short',
+                timeZone: timezone,
+              }).format(updated.startsAt)
+            : null;
 
           void this.notifications.createNotification({
             userId: record.patientId,
             title: 'Appointment Rescheduled',
-            message: `Consultation updated to ${timeFormatted} IST.`,
+            message: timeFormatted
+              ? `Consultation updated to ${timeFormatted} (${timezone}).`
+              : 'Your consultation time was updated. Sign in to view the appointment details.',
             type: 'reschedule',
             appointmentId: id,
           });
@@ -799,7 +859,9 @@ export class AppointmentsService {
           void this.notifications.createNotification({
             userId: record.doctorId,
             title: 'Appointment Rescheduled',
-            message: `Patient consultation updated to ${timeFormatted} IST.`,
+            message: timeFormatted
+              ? `Patient consultation updated to ${timeFormatted} (${timezone}).`
+              : 'The patient consultation time was updated.',
             type: 'reschedule',
             appointmentId: id,
           });
@@ -881,6 +943,9 @@ export class AppointmentsService {
           }
         }
       }
+
+      await this.enqueueAppointmentEmails(tx, 'appointment_cancelled', record, record.startsAt, 'cancelled');
+      await this.appointmentReminders?.cancelForAppointment(tx, id);
 
       return { updated, record, paymentIdToRefund, remainingPaise };
     });
@@ -965,6 +1030,8 @@ export class AppointmentsService {
       if (!updated) {
         throw new ConflictException('Appointment changed concurrently; please refresh.');
       }
+
+      await this.appointmentReminders?.cancelForAppointment(tx, id);
 
       if (this.notifications) {
         void this.notifications.createNotification({

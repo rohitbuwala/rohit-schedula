@@ -64,6 +64,34 @@
       "when": 1793449462223,
       "tag": "0008_refund_management",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793693411450,
+      "tag": "0009_email_outbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793777273481,
+      "tag": "0010_appointment_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793778742878,
+      "tag": "0011_reminder_payload_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793778979321,
+      "tag": "0012_reminder_retention_index",
+      "breakpoints": true
     }
   ]
 }

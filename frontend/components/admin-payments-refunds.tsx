@@ -105,8 +105,6 @@ export function AdminPaymentsRefunds() {
   const [detailPayment, setDetailPayment] = useState<AdminPaymentItem | null>(null);
 
   const fetchLedgers = useCallback(async () => {
-    setLoading(true);
-    setError("");
     try {
       const [paymentsRes, refundsRes] = await Promise.all([
         fetch(`${backendUrl}/api/admin/payments?limit=100`, {
@@ -129,20 +127,54 @@ export function AdminPaymentsRefunds() {
         throw new Error("Failed to load payment and refund ledgers from server.");
       }
 
-      const paymentsData = await paymentsRes.json();
-      const refundsData = await refundsRes.json();
+      const [paymentsData, refundsData] = await Promise.all([
+        paymentsRes.json(),
+        refundsRes.json(),
+      ]);
 
-      setPayments(Array.isArray(paymentsData.payments) ? paymentsData.payments : []);
-      setRefunds(Array.isArray(refundsData.refunds) ? refundsData.refunds : []);
+      return {
+        payments: Array.isArray(paymentsData.payments) ? paymentsData.payments : [],
+        refunds: Array.isArray(refundsData.refunds) ? refundsData.refunds : [],
+      };
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "Error loading financial ledgers.");
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    void fetchLedgers()
+      .then(({ payments: nextPayments, refunds: nextRefunds }) => {
+        if (!active) return;
+        setPayments(nextPayments);
+        setRefunds(nextRefunds);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Error loading financial ledgers.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [fetchLedgers]);
+
+  const refreshLedgers = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const { payments: nextPayments, refunds: nextRefunds } = await fetchLedgers();
+      setPayments(nextPayments);
+      setRefunds(nextRefunds);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error loading financial ledgers.");
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    void fetchLedgers();
   }, [fetchLedgers]);
 
   const handleReconcile = async () => {
@@ -159,7 +191,7 @@ export function AdminPaymentsRefunds() {
         throw new Error(data.message || "Reconciliation failed.");
       }
       setNotice(data.message || `Reconciliation complete. ${data.reconciledCount ?? 0} item(s) updated.`);
-      await fetchLedgers();
+      await refreshLedgers();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Reconciliation request failed.");
     } finally {
@@ -234,7 +266,7 @@ export function AdminPaymentsRefunds() {
         `Refund of ${formatInr(requestedPaise)} initiated successfully (Status: ${data.status || "pending"}).`
       );
       handleCloseRefundModal();
-      await fetchLedgers();
+      await refreshLedgers();
     } catch (err) {
       setRefundModalError(err instanceof Error ? err.message : "Error executing refund.");
     } finally {
@@ -330,7 +362,7 @@ export function AdminPaymentsRefunds() {
             type="button"
             variant="outline"
             size="sm"
-            onClick={fetchLedgers}
+            onClick={() => void refreshLedgers()}
             disabled={loading || reconciling}
             className="text-xs h-9"
           >
@@ -390,7 +422,7 @@ export function AdminPaymentsRefunds() {
       )}
 
       {/* Financial Metrics Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-4 min-[375px]:grid-cols-2 lg:grid-cols-4">
         <Card className="rounded-2xl border-slate-200 shadow-xs">
           <CardHeader className="p-4 pb-2">
             <CardDescription className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -543,7 +575,7 @@ export function AdminPaymentsRefunds() {
                 No payment transactions found matching the selected filter.
               </div>
             ) : (
-              <table className="w-full text-left text-xs border-collapse">
+              <table className="w-full min-w-[760px] text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600 uppercase tracking-wider">
                     <th className="py-3 px-4">Date & Time</th>
@@ -653,7 +685,7 @@ export function AdminPaymentsRefunds() {
                 No refund records found matching the selected filter.
               </div>
             ) : (
-              <table className="w-full text-left text-xs border-collapse">
+              <table className="w-full min-w-[700px] text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600 uppercase tracking-wider">
                     <th className="py-3 px-4">Refund Date</th>
@@ -724,7 +756,7 @@ export function AdminPaymentsRefunds() {
       {/* Issue Refund Modal */}
       {selectedPaymentForRefund && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl space-y-4">
+          <div className="w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-white p-4 shadow-xl space-y-4 sm:p-6">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="text-base font-bold text-slate-900">
                 Execute Administrative Refund
@@ -845,7 +877,7 @@ export function AdminPaymentsRefunds() {
       {/* Payment Details Drawer/Modal */}
       {detailPayment && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl space-y-4">
+          <div className="w-full max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl bg-white p-4 shadow-xl space-y-4 sm:p-6">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <h3 className="text-base font-bold text-slate-900">
                 Payment Audit Record

@@ -2,7 +2,8 @@ import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { and, eq, isNotNull, lt, lte, or } from 'drizzle-orm';
 import { db } from '../db/database.js';
-import { appointment, payment, refund } from '../db/schema.js';
+import { appointment, payment, refund, user } from '../db/schema.js';
+import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox.service.js';
 import { RAZORPAY_TOKEN, type RazorpayInstance } from './razorpay.provider.js';
 import { PaymentsService } from './payments.service.js';
 
@@ -93,6 +94,7 @@ export class PaymentReconciliationService implements OnModuleInit {
     private readonly paymentsService: PaymentsService,
     @Inject(RAZORPAY_TOKEN)
     private readonly razorpay: RazorpayInstance,
+    private readonly emailOutbox?: EmailOutboxService,
   ) {}
 
   async onModuleInit() {
@@ -330,17 +332,29 @@ export class PaymentReconciliationService implements OnModuleInit {
       }
 
       if (rzpStatus?.status === 'processed') {
-        await db.transaction(async (tx) => {
-          await tx
+        const transitioned = await db.transaction(async (tx) => {
+          const update: Partial<typeof refund.$inferInsert> = {
+            razorpayRefundId: rzpRefundId,
+            status: 'processed',
+            failureReason: null,
+            updatedAt: new Date(),
+          };
+          if (rzpStatus?.acquirer_data?.arn) update.arn = rzpStatus.acquirer_data.arn;
+          const [processedRefund] = await tx
             .update(refund)
-            .set({
-              razorpayRefundId: rzpRefundId,
-              status: 'processed',
-              arn: rzpStatus?.acquirer_data?.arn ?? null,
-              failureReason: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(refund.id, stRefund.id));
+            .set(update)
+            .where(and(eq(refund.id, stRefund.id), eq(refund.status, 'pending')))
+            .returning({
+              id: refund.id,
+              patientId: refund.patientId,
+              appointmentId: refund.appointmentId,
+              paymentId: refund.paymentId,
+              amountPaise: refund.amountPaise,
+              currency: refund.currency,
+              arn: refund.arn,
+            });
+          // Only the worker that changed pending -> processed may account or enqueue.
+          if (!processedRefund) return false;
 
           const [payRecord] = await tx
             .select()
@@ -361,8 +375,30 @@ export class PaymentReconciliationService implements OnModuleInit {
               })
               .where(eq(payment.id, payRecord.id));
           }
+
+          if (this.emailOutbox) {
+            const [patient] = await tx.select({ name: user.name, email: user.email })
+              .from(user).where(eq(user.id, processedRefund.patientId)).limit(1);
+            if (patient) {
+              await this.emailOutbox.enqueue(tx, {
+                eventKey: emailEventKey.refundProcessed(processedRefund.id, processedRefund.patientId),
+                eventType: 'refund_processed',
+                recipient: patient.email,
+                appointmentId: processedRefund.appointmentId,
+                paymentId: processedRefund.paymentId,
+                refundId: processedRefund.id,
+                payload: {
+                  recipientName: patient.name,
+                  amountPaise: processedRefund.amountPaise,
+                  currency: processedRefund.currency,
+                  arn: processedRefund.arn,
+                },
+              });
+            }
+          }
+          return true;
         });
-        return true;
+        return transitioned;
       } else if (rzpStatus?.status === 'failed') {
         await db
           .update(refund)

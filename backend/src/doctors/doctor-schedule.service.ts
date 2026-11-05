@@ -52,6 +52,10 @@ export class DoctorScheduleService {
     return fresh;
   }
 
+  async getTimezoneForDoctor(doctorId: string): Promise<string> {
+    return (await this.getSchedule(doctorId)).timezone;
+  }
+
   async updateSchedule(doctorId: string, update: DoctorScheduleUpdate): Promise<DoctorScheduleData> {
     const current = await this.getSchedule(doctorId);
     const updated: DoctorScheduleData = {

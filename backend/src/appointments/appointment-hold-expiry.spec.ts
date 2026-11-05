@@ -3,6 +3,7 @@ import { AppointmentExpiryService } from './appointment-expiry.service.js';
 import { AppointmentsService } from './appointments.service.js';
 import { getAvailableSlots } from './appointment-availability.js';
 import { db } from '../db/database.js';
+import { appointment, payment } from '../db/schema.js';
 
 vi.mock('../db/database.js', () => ({
   db: {
@@ -210,9 +211,7 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
       const mockTx = {
         select: vi.fn().mockReturnValueOnce({
           from: vi.fn().mockReturnValueOnce({
-            where: vi.fn().mockReturnValueOnce({
-              for: vi.fn().mockResolvedValueOnce([]), // 0 expired holds
-            }),
+            where: vi.fn().mockResolvedValueOnce([]), // 0 expired holds
           }),
         }),
       };
@@ -230,15 +229,13 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           // 1. Select expired appointments
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockResolvedValueOnce([
+              where: vi.fn().mockResolvedValueOnce([
                   {
                     id: expiredApptId,
                     patientId: 'pat-1',
                     doctorId: 'doc-1',
                   },
                 ]),
-              }),
             }),
           })
           // 2. Select payment record for appt
@@ -252,6 +249,22 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
                       status: 'created',
                     },
                   ]),
+                }),
+              }),
+            }),
+          })
+          // 3. Lock/recheck the expired appointment after locking its payment
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                for: vi.fn().mockReturnValueOnce({
+                  limit: vi.fn().mockResolvedValueOnce([{
+                    id: expiredApptId,
+                    patientId: 'pat-1',
+                    doctorId: 'doc-1',
+                    startsAt: new Date('2027-01-02T12:00:00Z'),
+                    reminderGeneration: 0,
+                  }]),
                 }),
               }),
             }),
@@ -287,15 +300,13 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           // 1. Found in expired list
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockResolvedValueOnce([
+              where: vi.fn().mockResolvedValueOnce([
                   {
                     id: raceApptId,
                     patientId: 'pat-1',
                     doctorId: 'doc-1',
                   },
                 ]),
-              }),
             }),
           })
           // 2. Payment check reveals it was captured!
@@ -312,15 +323,29 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
                 }),
               }),
             }),
+          })
+          // 3. Lock/recheck the appointment after the payment lock
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                for: vi.fn().mockReturnValueOnce({
+                  limit: vi.fn().mockResolvedValueOnce([{
+                    id: raceApptId,
+                    patientId: 'pat-1',
+                    doctorId: 'doc-1',
+                    startsAt: new Date('2027-01-02T12:00:00Z'),
+                    reminderGeneration: 0,
+                  }]),
+                }),
+              }),
+            }),
           }),
         update: vi
           .fn()
           // Updates appointment to scheduled, does NOT cancel
           .mockReturnValueOnce({
             set: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                where: vi.fn().mockResolvedValueOnce([]),
-              }),
+              where: vi.fn().mockResolvedValueOnce([]),
             }),
           }),
       };
@@ -330,15 +355,15 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
       // 0 appointments cancelled
       expect(count).toBe(0);
       expect(mockTx.update).toHaveBeenCalled();
+      expect(mockTx.select.mock.calls[1]?.[0]).toEqual(expect.objectContaining({ id: payment.id }));
+      expect(mockTx.select.mock.calls[2]?.[0]).toEqual(expect.objectContaining({ id: appointment.id }));
     });
 
     it('is idempotent across duplicate cleanup runs and server restarts', async () => {
       const mockTx = {
         select: vi.fn().mockReturnValue({
           from: vi.fn().mockReturnValue({
-            where: vi.fn().mockReturnValue({
-              for: vi.fn().mockResolvedValue([]),
-            }),
+            where: vi.fn().mockResolvedValue([]),
           }),
         }),
       };

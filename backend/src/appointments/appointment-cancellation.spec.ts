@@ -134,10 +134,12 @@ describe('appointment cancellation service logic', () => {
   it('successfully cancels when owning patient requests it', async () => {
     const tx = mockTransactionWith({ id: appointmentId, patientId, doctorId, status: 'scheduled' });
     const doctors = { isApproved: vi.fn().mockResolvedValue(true) };
-    const service = new AppointmentsService(doctors as never);
+    const reminders = { cancelForAppointment: vi.fn() };
+    const service = new AppointmentsService(doctors as never, undefined, undefined, undefined, undefined, undefined, reminders as never);
     const result = await service.cancel(appointmentId, { id: patientId, role: 'patient' } as AuthenticatedUser);
     expect(result.status).toBe('cancelled');
     expect(tx.update).toHaveBeenCalled();
+    expect(reminders.cancelForAppointment).toHaveBeenCalledWith(tx, appointmentId);
   });
 
   it('successfully cancels when assigned approved doctor requests it', async () => {
@@ -235,9 +237,11 @@ describe('appointment completion logic', () => {
   it('successfully completes appointment when assigned approved doctor finishes consultation', async () => {
     const tx = mockTransactionWith({ id: appointmentId, doctorId, status: 'scheduled' });
     const doctors = { isApproved: vi.fn().mockResolvedValue(true) };
-    const service = new AppointmentsService(doctors as never);
+    const reminders = { cancelForAppointment: vi.fn() };
+    const service = new AppointmentsService(doctors as never, undefined, undefined, undefined, undefined, undefined, reminders as never);
     const result = await service.complete(appointmentId, { id: doctorId, role: 'doctor' } as AuthenticatedUser);
     expect(result.status).toBe('completed');
     expect(tx.update).toHaveBeenCalled();
+    expect(reminders.cancelForAppointment).toHaveBeenCalledWith(tx, appointmentId);
   });
 });

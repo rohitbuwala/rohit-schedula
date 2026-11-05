@@ -73,6 +73,7 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
         patientId,
         doctorId,
         status: 'scheduled',
+        startsAt: new Date('2026-12-01T10:00:00.000Z'),
       };
 
       const mockPayRecord = {
@@ -81,6 +82,15 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
         amountPaise: 50000,
         refundedAmountPaise: 0,
       };
+      const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      appointmentsService = new AppointmentsService(
+        mockDoctors as never,
+        undefined,
+        mockNotifications,
+        mockPayments as never,
+        undefined,
+        mockEmailOutbox as never,
+      );
 
       const mockTx = {
         select: vi
@@ -103,6 +113,14 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
                   limit: vi.fn().mockResolvedValueOnce([mockApptRecord]),
                 }),
               }),
+            }),
+          })
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockResolvedValueOnce([
+                { id: patientId, name: 'Test Patient', email: 'patient@example.invalid' },
+                { id: doctorId, name: 'Test Doctor', email: 'doctor@example.invalid' },
+              ]),
             }),
           }),
         update: vi.fn().mockReturnValueOnce({
@@ -133,6 +151,11 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
         }),
       );
       expect(mockNotifications.createNotification).toHaveBeenCalled();
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledTimes(2);
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({ eventType: 'appointment_cancelled', appointmentId }),
+      );
     });
 
     it('2. triggers an immediate full refund when a paid scheduled appointment is cancelled by doctor', async () => {

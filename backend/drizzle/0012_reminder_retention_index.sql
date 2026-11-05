@@ -1,0 +1,1 @@
+CREATE INDEX "appointment_reminder_retention_idx" ON "appointment_reminder" USING btree ("status","sent_at","updated_at");

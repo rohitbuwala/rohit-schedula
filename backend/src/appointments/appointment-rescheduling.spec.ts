@@ -36,19 +36,29 @@ describe('appointment rescheduling controller & service', () => {
         endsAt: validNewEndsAt,
         status: 'scheduled',
         updatedAt: new Date(),
+        reminderGeneration: 1,
       },
-    ]
+    ],
+    participants?: Array<{ id: string; name: string; email: string }>,
   ) {
-    const tx = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnValue({
-          where: vi.fn().mockReturnValue({
-            for: vi.fn().mockReturnValue({
-              limit: vi.fn().mockResolvedValue(record ? [record] : []),
-            }),
+    const select = vi.fn().mockReturnValueOnce({
+      from: vi.fn().mockReturnValueOnce({
+        where: vi.fn().mockReturnValueOnce({
+          for: vi.fn().mockReturnValueOnce({
+            limit: vi.fn().mockResolvedValue(record ? [record] : []),
           }),
         }),
       }),
+    });
+    if (participants) {
+      select.mockReturnValueOnce({
+        from: vi.fn().mockReturnValueOnce({
+          where: vi.fn().mockResolvedValueOnce(participants),
+        }),
+      });
+    }
+    const tx = {
+      select,
       update: vi.fn().mockReturnValue({
         set: vi.fn().mockReturnValue({
           where: vi.fn().mockReturnValue({
@@ -155,6 +165,9 @@ describe('appointment rescheduling controller & service', () => {
   });
 
   it('successfully updates appointment atomically and creates notifications', async () => {
+    const emailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+    const reminders = { cancelForAppointment: vi.fn(), scheduleForAppointment: vi.fn() };
+    const scheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
     const tx = mockTransactionWith({
       id: appointmentId,
       patientId,
@@ -162,10 +175,13 @@ describe('appointment rescheduling controller & service', () => {
       startsAt: new Date(Date.now() + 3600000),
       endsAt: new Date(Date.now() + 5400000),
       status: 'scheduled',
-    });
+    }, undefined, [
+      { id: patientId, name: 'Test Patient', email: 'patient@example.invalid' },
+      { id: doctorId, name: 'Test Doctor', email: 'doctor@example.invalid' },
+    ]);
     const doctors = { isApproved: vi.fn().mockResolvedValue(true) };
     const notifications = { createNotification: vi.fn().mockResolvedValue({}) };
-    const service = new AppointmentsService(doctors as never, undefined, notifications as never);
+    const service = new AppointmentsService(doctors as never, scheduleService as never, notifications as never, undefined, undefined, emailOutbox as never, reminders as never);
 
     const result = await service.reschedule(appointmentId, { id: patientId, role: 'patient' } as AuthenticatedUser, {
       startsAt: validNewStartsAt,
@@ -175,5 +191,17 @@ describe('appointment rescheduling controller & service', () => {
     expect(result.id).toBe(appointmentId);
     expect(tx.update).toHaveBeenCalled();
     expect(notifications.createNotification).toHaveBeenCalledTimes(2); // for both patient & doctor
+    expect(notifications.createNotification.mock.calls.map(([notification]) => notification.message).join(' ')).toContain('(America/New_York)');
+    expect(emailOutbox.enqueue).toHaveBeenCalledTimes(2);
+    expect(reminders.cancelForAppointment).toHaveBeenCalledWith(tx, appointmentId);
+    expect(reminders.scheduleForAppointment).toHaveBeenCalledWith(tx, expect.objectContaining({ reminderGeneration: 1 }), 'America/New_York');
+    expect(emailOutbox.enqueue).toHaveBeenCalledWith(
+      tx,
+      expect.objectContaining({
+        eventType: 'appointment_rescheduled',
+        appointmentId,
+        payload: expect.objectContaining({ timezone: 'America/New_York' }),
+      }),
+    );
   });
 });

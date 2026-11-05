@@ -9,11 +9,14 @@ import {
   Optional,
 } from '@nestjs/common';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from '../db/database.js';
 import { appointment, doctorProfile, payment, refund, user } from '../db/schema.js';
 import { loadEnv, type AppEnvironment } from '../config/env.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { EmailOutboxService, emailEventKey, type OutboxTransaction } from '../notifications/email-outbox.service.js';
+import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
+import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { RAZORPAY_TOKEN, type RazorpayInstance } from './razorpay.provider.js';
 import type {
   AdminListPaymentsQueryDto,
@@ -33,8 +36,123 @@ export class PaymentsService {
     private readonly razorpay: RazorpayInstance,
     @Optional()
     private readonly notifications?: NotificationsService,
+    @Optional()
+    private readonly emailOutbox?: EmailOutboxService,
+    @Optional()
+    private readonly scheduleService?: DoctorScheduleService,
+    @Optional()
+    private readonly appointmentReminders?: AppointmentReminderService,
   ) {
     this.env = loadEnv();
+  }
+
+  private async scheduleAppointmentReminders(
+    tx: OutboxTransaction,
+    record: { id: string; patientId: string; doctorId: string; startsAt: Date; updatedAt: Date; reminderGeneration: number },
+  ): Promise<void> {
+    if (!this.appointmentReminders) return;
+    const timezone = await this.scheduleService?.getTimezoneForDoctor(record.doctorId) ?? 'Asia/Kolkata';
+    await this.appointmentReminders.scheduleForAppointment(tx, record, timezone);
+  }
+
+  private async enqueuePaymentConfirmationEmails(
+    tx: OutboxTransaction,
+    input: { appointmentId: string; paymentId: string; patientId: string; doctorId: string; startsAt: Date; amountPaise: number; currency: string },
+  ): Promise<void> {
+    if (!this.emailOutbox) return;
+    const participants = await tx.select({ id: user.id, name: user.name, email: user.email })
+      .from(user)
+      .where(inArray(user.id, [input.patientId, input.doctorId]));
+    const patient = participants.find((participant) => participant.id === input.patientId);
+    const doctor = participants.find((participant) => participant.id === input.doctorId);
+    if (!patient || !doctor) return;
+    const timezone = await this.scheduleService?.getTimezoneForDoctor(input.doctorId);
+
+    await this.emailOutbox.enqueue(tx, {
+      eventKey: emailEventKey.booking(input.appointmentId, patient.id),
+      eventType: 'booking_confirmation',
+      recipient: patient.email,
+      appointmentId: input.appointmentId,
+      paymentId: input.paymentId,
+      payload: {
+        recipientName: patient.name,
+        otherPartyName: `Dr. ${doctor.name}`,
+        ...(timezone ? { startsAt: input.startsAt.toISOString(), timezone } : {}),
+      },
+    });
+    await this.enqueuePaymentReceiptEmail(tx, input, patient, doctor, timezone);
+    await this.emailOutbox.enqueue(tx, {
+      eventKey: emailEventKey.booking(input.appointmentId, doctor.id),
+      eventType: 'booking_confirmation',
+      recipient: doctor.email,
+      appointmentId: input.appointmentId,
+      paymentId: input.paymentId,
+      payload: {
+        recipientName: doctor.name,
+        otherPartyName: patient.name,
+        ...(timezone ? { startsAt: input.startsAt.toISOString(), timezone } : {}),
+      },
+    });
+  }
+
+  private async enqueuePaymentReceiptEmail(
+    tx: OutboxTransaction,
+    input: { appointmentId: string; paymentId: string; patientId: string; doctorId: string; startsAt: Date; amountPaise: number; currency: string },
+    knownPatient?: { id: string; name: string; email: string },
+    knownDoctor?: { id: string; name: string; email: string },
+    knownTimezone?: string,
+  ): Promise<void> {
+    if (!this.emailOutbox) return;
+    let patient = knownPatient;
+    let doctor = knownDoctor;
+    if (!patient || !doctor) {
+      const participants = await tx.select({ id: user.id, name: user.name, email: user.email })
+        .from(user)
+        .where(inArray(user.id, [input.patientId, input.doctorId]));
+      patient = participants.find((participant) => participant.id === input.patientId);
+      doctor = participants.find((participant) => participant.id === input.doctorId);
+    }
+    if (!patient || !doctor) return;
+    const timezone = knownTimezone ?? await this.scheduleService?.getTimezoneForDoctor(input.doctorId);
+    await this.emailOutbox.enqueue(tx, {
+      eventKey: emailEventKey.receipt(input.paymentId, patient.id),
+      eventType: 'payment_receipt',
+      recipient: patient.email,
+      appointmentId: input.appointmentId,
+      paymentId: input.paymentId,
+      payload: {
+        recipientName: patient.name,
+        otherPartyName: `Dr. ${doctor.name}`,
+        ...(timezone ? { startsAt: input.startsAt.toISOString(), timezone } : {}),
+        amountPaise: input.amountPaise,
+        currency: input.currency,
+      },
+    });
+  }
+
+  private async enqueueRefundProcessedEmail(
+    tx: OutboxTransaction,
+    item: { id: string; patientId: string; appointmentId: string; paymentId: string; amountPaise: number; currency: string },
+    arn: string | null,
+  ): Promise<void> {
+    if (!this.emailOutbox) return;
+    const [patient] = await tx.select({ name: user.name, email: user.email })
+      .from(user).where(eq(user.id, item.patientId)).limit(1);
+    if (!patient) return;
+    await this.emailOutbox.enqueue(tx, {
+      eventKey: emailEventKey.refundProcessed(item.id, item.patientId),
+      eventType: 'refund_processed',
+      recipient: patient.email,
+      appointmentId: item.appointmentId,
+      paymentId: item.paymentId,
+      refundId: item.id,
+      payload: {
+        recipientName: patient.name,
+        amountPaise: item.amountPaise,
+        currency: item.currency,
+        arn,
+      },
+    });
   }
 
   /**
@@ -286,6 +404,16 @@ export class PaymentsService {
           })
           .where(eq(payment.id, paymentRecord.id));
 
+        await this.enqueuePaymentReceiptEmail(tx, {
+          appointmentId: paymentRecord.appointmentId,
+          paymentId: paymentRecord.id,
+          patientId: paymentRecord.patientId,
+          doctorId: paymentRecord.doctorId,
+          startsAt: apptRecord.startsAt,
+          amountPaise: paymentRecord.amountPaise,
+          currency: paymentRecord.currency,
+        });
+
         if (this.notifications) {
           void this.notifications.createNotification({
             userId: paymentRecord.patientId,
@@ -331,24 +459,45 @@ export class PaymentsService {
         .where(eq(appointment.id, paymentRecord.appointmentId))
         .returning({
           id: appointment.id,
+          patientId: appointment.patientId,
           startsAt: appointment.startsAt,
           endsAt: appointment.endsAt,
           status: appointment.status,
           doctorId: appointment.doctorId,
+          updatedAt: appointment.updatedAt,
+          reminderGeneration: appointment.reminderGeneration,
         });
+
+      if (updatedAppt) {
+        await this.scheduleAppointmentReminders(tx, updatedAppt);
+        await this.enqueuePaymentConfirmationEmails(tx, {
+          appointmentId: updatedAppt.id,
+          paymentId: paymentRecord.id,
+          patientId: paymentRecord.patientId,
+          doctorId: paymentRecord.doctorId,
+          startsAt: updatedAppt.startsAt,
+          amountPaise: paymentRecord.amountPaise,
+          currency: paymentRecord.currency,
+        });
+      }
 
       // Dispatch notifications
       if (this.notifications && updatedAppt) {
-        const timeFormatted = new Intl.DateTimeFormat('en-IN', {
-          dateStyle: 'medium',
-          timeStyle: 'short',
-          timeZone: 'Asia/Kolkata',
-        }).format(updatedAppt.startsAt);
+        const timezone = await this.scheduleService?.getTimezoneForDoctor(updatedAppt.doctorId);
+        const timeFormatted = timezone
+          ? new Intl.DateTimeFormat('en-IN', {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+              timeZone: timezone,
+            }).format(updatedAppt.startsAt)
+          : null;
 
         void this.notifications.createNotification({
           userId: paymentRecord.patientId,
           title: 'Payment Confirmed & Appointment Booked',
-          message: `Payment successful. Consultation confirmed for ${timeFormatted} IST.`,
+          message: timeFormatted
+            ? `Payment successful. Consultation confirmed for ${timeFormatted} (${timezone}).`
+            : 'Payment successful. Your consultation is confirmed. Sign in to view the appointment details.',
           type: 'booking',
           appointmentId: updatedAppt.id,
         });
@@ -356,7 +505,9 @@ export class PaymentsService {
         void this.notifications.createNotification({
           userId: paymentRecord.doctorId,
           title: 'New Paid Appointment',
-          message: `A new consultation has been paid and scheduled for ${timeFormatted} IST.`,
+          message: timeFormatted
+            ? `A new consultation has been paid and scheduled for ${timeFormatted} (${timezone}).`
+            : 'A new consultation has been paid and scheduled.',
           type: 'booking',
           appointmentId: updatedAppt.id,
         });
@@ -733,6 +884,16 @@ export class PaymentsService {
             })
             .where(eq(payment.id, paymentRecord.id));
 
+          await this.enqueuePaymentReceiptEmail(tx, {
+            appointmentId: paymentRecord.appointmentId,
+            paymentId: paymentRecord.id,
+            patientId: paymentRecord.patientId,
+            doctorId: paymentRecord.doctorId,
+            startsAt: apptRecord.startsAt,
+            amountPaise: paymentRecord.amountPaise,
+            currency: paymentRecord.currency,
+          });
+
           reassignedPaymentId = paymentRecord.id;
 
           if (this.notifications) {
@@ -769,23 +930,44 @@ export class PaymentsService {
           .where(eq(appointment.id, paymentRecord.appointmentId))
           .returning({
             id: appointment.id,
+            patientId: appointment.patientId,
             startsAt: appointment.startsAt,
             endsAt: appointment.endsAt,
             status: appointment.status,
             doctorId: appointment.doctorId,
+            updatedAt: appointment.updatedAt,
+            reminderGeneration: appointment.reminderGeneration,
           });
 
+        if (updatedAppt) {
+          await this.scheduleAppointmentReminders(tx, updatedAppt);
+          await this.enqueuePaymentConfirmationEmails(tx, {
+            appointmentId: updatedAppt.id,
+            paymentId: paymentRecord.id,
+            patientId: paymentRecord.patientId,
+            doctorId: paymentRecord.doctorId,
+            startsAt: updatedAppt.startsAt,
+            amountPaise: paymentRecord.amountPaise,
+            currency: paymentRecord.currency,
+          });
+        }
+
         if (this.notifications && updatedAppt) {
-          const timeFormatted = new Intl.DateTimeFormat('en-IN', {
-            dateStyle: 'medium',
-            timeStyle: 'short',
-            timeZone: 'Asia/Kolkata',
-          }).format(updatedAppt.startsAt);
+          const timezone = await this.scheduleService?.getTimezoneForDoctor(updatedAppt.doctorId);
+          const timeFormatted = timezone
+            ? new Intl.DateTimeFormat('en-IN', {
+                dateStyle: 'medium',
+                timeStyle: 'short',
+                timeZone: timezone,
+              }).format(updatedAppt.startsAt)
+            : null;
 
           void this.notifications.createNotification({
             userId: paymentRecord.patientId,
             title: 'Payment Confirmed & Appointment Booked',
-            message: `Payment successful. Consultation confirmed for ${timeFormatted} IST.`,
+            message: timeFormatted
+              ? `Payment successful. Consultation confirmed for ${timeFormatted} (${timezone}).`
+              : 'Payment successful. Your consultation is confirmed. Sign in to view the appointment details.',
             type: 'booking',
             appointmentId: updatedAppt.id,
           });
@@ -793,7 +975,9 @@ export class PaymentsService {
           void this.notifications.createNotification({
             userId: paymentRecord.doctorId,
             title: 'New Paid Appointment',
-            message: `A new consultation has been paid and scheduled for ${timeFormatted} IST.`,
+            message: timeFormatted
+              ? `A new consultation has been paid and scheduled for ${timeFormatted} (${timezone}).`
+              : 'A new consultation has been paid and scheduled.',
             type: 'booking',
             appointmentId: updatedAppt.id,
           });
@@ -884,6 +1068,7 @@ export class PaymentsService {
           )
           .for('update')
           .limit(1);
+        let transitionedToProcessed = false;
 
         if (!refundRecord) {
           // If refund was initiated externally in Razorpay Dashboard, create audit record
@@ -917,20 +1102,33 @@ export class PaymentsService {
             })
             .returning();
           refundRecord = inserted;
+          transitionedToProcessed = Boolean(inserted);
         } else {
           if (refundRecord.status === 'processed') {
             return { received: true, note: 'Refund already processed.' };
           }
 
-          await tx
+          const update: Partial<typeof refund.$inferInsert> = {
+            razorpayRefundId: rzpRefundId,
+            status: 'processed',
+            failureReason: null,
+            updatedAt: new Date(),
+          };
+          if (arn) update.arn = arn;
+          const [processedRecord] = await tx
             .update(refund)
-            .set({
-              razorpayRefundId: rzpRefundId,
-              status: 'processed',
-              arn: arn ?? refundRecord.arn,
-              updatedAt: new Date(),
-            })
-            .where(eq(refund.id, refundRecord.id));
+            .set(update)
+            .where(and(eq(refund.id, refundRecord.id), eq(refund.status, 'pending')))
+            .returning();
+          if (!processedRecord) {
+            return { received: true, note: 'Refund was already transitioned.' };
+          }
+          refundRecord = processedRecord;
+          transitionedToProcessed = true;
+        }
+
+        if (!transitionedToProcessed || !refundRecord) {
+          return { received: true, note: 'Refund was already transitioned.' };
         }
 
         // Increment payment refunded amount and update status if fully refunded
@@ -954,12 +1152,21 @@ export class PaymentsService {
             .where(eq(payment.id, payRecord.id));
         }
 
+        await this.enqueueRefundProcessedEmail(tx, {
+          id: refundRecord.id,
+          patientId: refundRecord.patientId,
+          appointmentId: refundRecord.appointmentId,
+          paymentId: refundRecord.paymentId,
+          amountPaise: refundRecord.amountPaise,
+          currency: refundRecord.currency,
+        }, refundRecord.arn);
+
         if (this.notifications) {
           const inrAmount = (refundRecord.amountPaise / 100).toFixed(2);
           void this.notifications.createNotification({
             userId: refundRecord.patientId,
             title: 'Refund Processed',
-            message: `Your refund of ₹${inrAmount} has been processed successfully (ARN: ${arn ?? 'N/A'}).`,
+            message: `Your refund of ₹${inrAmount} has been processed successfully${refundRecord.arn ? ` (ARN: ${refundRecord.arn})` : ''}.`,
             type: 'booking',
             appointmentId: refundRecord.appointmentId,
           });

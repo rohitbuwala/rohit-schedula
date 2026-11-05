@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Bell,
   Calendar,
@@ -23,11 +24,60 @@ export interface InAppNotification {
   createdAt: string;
 }
 
-export function NotificationsBell() {
-  const [open, setOpen] = useState(false);
+interface NotificationsBellProps {
+  isOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+export function NotificationsBell({
+  isOpen: controlledOpen,
+  onOpenChange,
+}: NotificationsBellProps = {}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const [renderInPortal, setRenderInPortal] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<InAppNotification[]>([]);
   const [loading, setLoading] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+
+  const updateOpen = useCallback((nextOpen: boolean) => {
+    if (controlledOpen === undefined) setUncontrolledOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  }, [controlledOpen, onOpenChange]);
+
+  const closePopover = useCallback(() => {
+    updateOpen(false);
+    triggerRef.current?.focus({ preventScroll: true });
+  }, [updateOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function handlePopoverKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePopover();
+      }
+    }
+
+    document.addEventListener("keydown", handlePopoverKeyDown);
+    return () => document.removeEventListener("keydown", handlePopoverKeyDown);
+  }, [closePopover, open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const desktopBreakpoint = window.matchMedia("(min-width: 1024px)");
+    const handleViewportChange = (event: MediaQueryListEvent) => {
+      setRenderInPortal(!event.matches);
+      updateOpen(false);
+    };
+
+    desktopBreakpoint.addEventListener("change", handleViewportChange);
+    return () => desktopBreakpoint.removeEventListener("change", handleViewportChange);
+  }, [open, updateOpen]);
 
   useEffect(() => {
     let active = true;
@@ -55,24 +105,27 @@ export function NotificationsBell() {
   }, []);
 
   async function handleToggleOpen() {
-    const nextState = !open;
-    setOpen(nextState);
-    if (nextState) {
-      setLoading(true);
-      try {
-        const res = await fetch(`${backendUrl}/api/notifications`, {
-          credentials: "include",
-          cache: "no-store",
-        });
-        if (res.ok) {
-          const list: InAppNotification[] = await res.json();
-          setNotifications(list);
-        }
-      } catch {
-        // Fallback
-      } finally {
-        setLoading(false);
+    if (open) {
+      closePopover();
+      return;
+    }
+
+    setRenderInPortal(window.matchMedia("(max-width: 1023px)").matches);
+    updateOpen(true);
+    setLoading(true);
+    try {
+      const res = await fetch(`${backendUrl}/api/notifications`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const list: InAppNotification[] = await res.json();
+        setNotifications(list);
       }
+    } catch {
+      // Fallback
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -119,13 +172,114 @@ export function NotificationsBell() {
     }
   }
 
+  const notificationPanel = (className: string) => (
+    <section
+      id={`${panelId}-panel`}
+      role="dialog"
+      aria-labelledby={`${panelId}-title`}
+      className={className}
+    >
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-slate-100 pb-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 id={`${panelId}-title`} className="shrink-0 text-sm font-bold text-slate-900">
+            Notifications
+          </h3>
+          {unreadCount > 0 && (
+            <span className="whitespace-nowrap rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800">
+              {unreadCount} unread
+            </span>
+          )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {unreadCount > 0 && (
+            <button
+              type="button"
+              onClick={handleMarkAllRead}
+              className="whitespace-nowrap text-[11px] font-medium text-teal-700 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600"
+            >
+              Mark all read
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={closePopover}
+            aria-label="Close notifications"
+            className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain divide-y divide-slate-100 py-2">
+        {loading && (
+          <p className="py-6 text-center text-xs text-slate-500">
+            Loading notifications…
+          </p>
+        )}
+        {!loading && notifications.length === 0 && (
+          <div className="space-y-1 py-8 text-center text-xs text-slate-500">
+            <Bell className="mx-auto h-6 w-6 text-slate-300" />
+            <p className="font-semibold text-slate-700">All caught up</p>
+            <p>You have no recent notifications.</p>
+          </div>
+        )}
+        {!loading && notifications.map((notification) => (
+          <button
+            type="button"
+            key={notification.id}
+            onClick={() => !notification.read && handleMarkRead(notification.id)}
+            disabled={notification.read}
+            aria-label={notification.read
+              ? `${notification.title}, already read`
+              : `Mark notification as read: ${notification.title}`}
+            className={`flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-teal-600 ${
+              notification.read ? "bg-white hover:bg-slate-50" : "bg-teal-50/50 hover:bg-teal-50"
+            }`}
+          >
+            <div className="mt-0.5 shrink-0 rounded-lg border border-slate-200 bg-slate-100 p-1.5">
+              {getTypeIcon(notification.type)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-1">
+                <p className={`truncate text-xs ${notification.read ? "font-medium text-slate-800" : "font-bold text-slate-900"}`}>
+                  {notification.title}
+                </p>
+                <span className="shrink-0 text-[10px] text-slate-400">
+                  {new Date(notification.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                </span>
+              </div>
+              <p className="mt-0.5 line-clamp-2 text-[11px] text-slate-600">
+                {notification.message}
+              </p>
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+
+  const closeBackdrop = (className: string) => (
+    <button
+      type="button"
+      aria-label="Close notifications"
+      tabIndex={-1}
+      className={className}
+      onClick={closePopover}
+    />
+  );
+
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={handleToggleOpen}
         className="relative rounded-full p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition focus:outline-none focus:ring-2 focus:ring-teal-600"
         aria-label="View notifications"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={`${panelId}-panel`}
       >
         <Bell className="h-5 w-5" />
         {unreadCount > 0 && (
@@ -135,84 +289,22 @@ export function NotificationsBell() {
         )}
       </button>
 
-      {open && (
+      {open && renderInPortal && createPortal(
         <>
+          {closeBackdrop("fixed inset-0 z-[90] cursor-default bg-black/10")}
           <div
-            className="fixed inset-0 z-40 bg-black/10"
-            onClick={() => setOpen(false)}
-          />
-          <div className="absolute right-0 top-11 z-50 w-80 sm:w-96 rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-sm text-slate-900">Notifications</h3>
-                {unreadCount > 0 && (
-                  <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[10px] font-semibold text-teal-800">
-                    {unreadCount} unread
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {unreadCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleMarkAllRead}
-                    className="text-[11px] font-medium text-teal-700 hover:underline"
-                  >
-                    Mark all read
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setOpen(false)}
-                  className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-
-            <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 py-2">
-              {loading && (
-                <p className="py-6 text-center text-xs text-slate-500">
-                  Loading notifications…
-                </p>
-              )}
-              {!loading && notifications.length === 0 && (
-                <div className="py-8 text-center text-xs text-slate-500 space-y-1">
-                  <Bell className="h-6 w-6 text-slate-300 mx-auto" />
-                  <p className="font-semibold text-slate-700">All caught up</p>
-                  <p>You have no recent notifications.</p>
-                </div>
-              )}
-              {!loading &&
-                notifications.map((n) => (
-                  <div
-                    key={n.id}
-                    onClick={() => !n.read && handleMarkRead(n.id)}
-                    className={`flex items-start gap-3 p-2.5 rounded-xl transition cursor-pointer ${
-                      n.read ? "bg-white hover:bg-slate-50" : "bg-teal-50/50 hover:bg-teal-50"
-                    }`}
-                  >
-                    <div className="mt-0.5 shrink-0 rounded-lg bg-slate-100 p-1.5 border border-slate-200">
-                      {getTypeIcon(n.type)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-1">
-                        <p className={`text-xs truncate ${n.read ? "font-medium text-slate-800" : "font-bold text-slate-900"}`}>
-                          {n.title}
-                        </p>
-                        <span className="text-[10px] text-slate-400 shrink-0">
-                          {new Date(n.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-600 line-clamp-2 mt-0.5">
-                        {n.message}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-            </div>
+            className="pointer-events-none fixed inset-x-3 z-[100] flex justify-center"
+            style={{ top: "calc(env(safe-area-inset-top) + 76px)" }}
+          >
+            {notificationPanel("pointer-events-auto flex max-h-[calc(100dvh_-_88px)] w-full max-w-[380px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-3 shadow-xl")}
           </div>
+        </>,
+        document.body
+      )}
+      {open && !renderInPortal && (
+        <>
+          {closeBackdrop("fixed inset-0 z-40 cursor-default bg-black/10")}
+          {notificationPanel("absolute right-0 top-11 z-50 flex max-h-[calc(100dvh_-_2rem)] w-96 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-xl")}
         </>
       )}
     </div>

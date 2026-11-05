@@ -472,6 +472,8 @@ describe('Refund Management & Reconciliation', () => {
     });
 
     it('handles refund.processed idempotently and increments refunded paise', async () => {
+      const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      paymentsService = new PaymentsService(mockRazorpay, mockNotifications, mockEmailOutbox as never);
       const payload = {
         event: 'refund.processed',
         payload: {
@@ -504,6 +506,8 @@ describe('Refund Management & Reconciliation', () => {
                       appointmentId: 'appt-1',
                       patientId: 'patient-1',
                       amountPaise: 50000,
+                      currency: 'INR',
+                      arn: null,
                       status: 'pending',
                     },
                   ]),
@@ -527,13 +531,34 @@ describe('Refund Management & Reconciliation', () => {
                 }),
               }),
             }),
+          })
+          // 3. Fetch patient email for the transactional refund outbox event
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                limit: vi.fn().mockResolvedValueOnce([
+                  { name: 'Test Patient', email: 'patient@example.invalid' },
+                ]),
+              }),
+            }),
           }),
         update: vi
           .fn()
           // 1. Update refund
           .mockReturnValueOnce({
             set: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockResolvedValueOnce([]),
+              where: vi.fn().mockReturnValueOnce({
+                returning: vi.fn().mockResolvedValueOnce([{
+                  id: 'refund-1',
+                  paymentId: 'pay-1',
+                  appointmentId: 'appt-1',
+                  patientId: 'patient-1',
+                  amountPaise: 50000,
+                  currency: 'INR',
+                  arn: 'ARN99887766',
+                  status: 'processed',
+                }]),
+              }),
             }),
           })
           // 2. Update payment
@@ -549,9 +574,19 @@ describe('Refund Management & Reconciliation', () => {
       const res = await paymentsService.handleWebhook(signature, rawBody, payload);
       expect(res.received).toBe(true);
       expect(res.status).toBe('processed');
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({
+          eventKey: 'refund_processed:refund-1:patient-1',
+          eventType: 'refund_processed',
+          payload: expect.objectContaining({ amountPaise: 50000, currency: 'INR', arn: 'ARN99887766' }),
+        }),
+      );
     });
 
     it('returns idempotently when refund.processed arrives for already processed refund', async () => {
+      const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      paymentsService = new PaymentsService(mockRazorpay, mockNotifications, mockEmailOutbox as never);
       const payload = {
         event: 'refund.processed',
         payload: {
@@ -590,6 +625,7 @@ describe('Refund Management & Reconciliation', () => {
       const res = await paymentsService.handleWebhook(signature, rawBody, payload);
       expect(res.received).toBe(true);
       expect(res.note).toBe('Refund already processed.');
+      expect(mockEmailOutbox.enqueue).not.toHaveBeenCalled();
     });
 
     it('handles refund.failed by recording failure reason', async () => {
@@ -828,7 +864,17 @@ describe('Refund Management & Reconciliation', () => {
           // Update refund
           .mockReturnValueOnce({
             set: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockResolvedValueOnce([]),
+              where: vi.fn().mockReturnValueOnce({
+                returning: vi.fn().mockResolvedValueOnce([{
+                  id: 'rfnd-stale-1',
+                  patientId: 'patient-1',
+                  appointmentId: 'appt-1',
+                  paymentId: 'pay-stale-1',
+                  amountPaise: 50000,
+                  currency: 'INR',
+                  arn: 'ARN999',
+                }]),
+              }),
             }),
           })
           // Update payment
@@ -860,6 +906,96 @@ describe('Refund Management & Reconciliation', () => {
       const count = await reconciliationService.reconcileInconsistentPayments();
       expect(count).toBe(1);
       expect(mockRazorpay.refunds.fetch).toHaveBeenCalledWith('rfnd_rzp_99');
+    });
+
+    it('does not account or enqueue when the refund.processed webhook already won the transition', async () => {
+      (mockRazorpay.refunds.fetch as any).mockResolvedValueOnce({
+        id: 'rfnd_race_1',
+        status: 'processed',
+        acquirer_data: { arn: 'ARN_RACE_1' },
+      });
+      const mockTx = {
+        update: vi.fn().mockReturnValue({
+          set: vi.fn().mockReturnValue({
+            // The pending -> processed conditional UPDATE affects zero rows because the webhook committed first.
+            where: vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue([]) }),
+          }),
+        }),
+        select: vi.fn(),
+      };
+      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
+      const emailOutbox = { enqueue: vi.fn() };
+      const serviceWithEmailOutbox = new PaymentReconciliationService(paymentsService, mockRazorpay, emailOutbox as never);
+
+      const reconciled = await serviceWithEmailOutbox.reconcilePendingRefund({
+        id: 'refund-already-processed-by-webhook',
+        paymentId: 'pay-race-1',
+        razorpayRefundId: 'rfnd_race_1',
+        amountPaise: 50000,
+      });
+
+      expect(reconciled).toBe(false);
+      expect(mockTx.select).not.toHaveBeenCalled(); // payment row is not locked or incremented
+      expect(emailOutbox.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('preserves a stored ARN when gateway reconciliation omits it', async () => {
+      (mockRazorpay.refunds.fetch as any).mockResolvedValueOnce({
+        id: 'rfnd_arn_1',
+        status: 'processed',
+      });
+      const storedRefund = {
+        id: 'refund-arn-1',
+        patientId: 'patient-arn-1',
+        appointmentId: 'appointment-arn-1',
+        paymentId: 'payment-arn-1',
+        amountPaise: 25000,
+        currency: 'INR',
+        arn: 'ARN_ALREADY_STORED',
+      };
+      const updateRefundSet = vi.fn().mockReturnValue({
+        where: vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue([storedRefund]) }),
+      });
+      const updatePaymentSet = vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) });
+      const outbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      const mockTx = {
+        update: vi.fn()
+          .mockReturnValueOnce({ set: updateRefundSet })
+          .mockReturnValueOnce({ set: updatePaymentSet }),
+        select: vi.fn()
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                for: vi.fn().mockReturnValueOnce({ limit: vi.fn().mockResolvedValueOnce([{
+                  id: 'payment-arn-1', amountPaise: 50000, refundedAmountPaise: 0, status: 'captured',
+                }]) }),
+              }),
+            }),
+          })
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                limit: vi.fn().mockResolvedValueOnce([{ name: 'Test Patient', email: 'patient@example.invalid' }]),
+              }),
+            }),
+          }),
+      };
+      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
+      const serviceWithOutbox = new PaymentReconciliationService(paymentsService, mockRazorpay, outbox as never);
+
+      await expect(serviceWithOutbox.reconcilePendingRefund({
+        id: storedRefund.id,
+        paymentId: storedRefund.paymentId,
+        razorpayRefundId: 'rfnd_arn_1',
+        amountPaise: storedRefund.amountPaise,
+      })).resolves.toBe(true);
+
+      expect(updateRefundSet).toHaveBeenCalledWith(expect.objectContaining({ status: 'processed' }));
+      expect(updateRefundSet.mock.calls[0]?.[0]).not.toHaveProperty('arn');
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({ payload: expect.objectContaining({ arn: 'ARN_ALREADY_STORED' }) }),
+      );
     });
   });
 
@@ -1021,8 +1157,19 @@ describe('Refund Management & Reconciliation', () => {
         ],
       });
 
+      const processedRefund = {
+        id: stRefundId,
+        patientId: 'patient-1',
+        appointmentId: 'appointment-1',
+        paymentId: 'pay-db-1',
+        amountPaise: 50000,
+        currency: 'INR',
+        arn: 'ARN_DISCOVERED_123',
+      };
       const updateRefundSetSpy = vi.fn().mockReturnValueOnce({
-        where: vi.fn().mockResolvedValueOnce([]),
+        where: vi.fn().mockReturnValueOnce({
+          returning: vi.fn().mockResolvedValueOnce([processedRefund]),
+        }),
       });
       const updatePaymentSetSpy = vi.fn().mockReturnValueOnce({
         where: vi.fn().mockResolvedValueOnce([]),
@@ -1033,27 +1180,43 @@ describe('Refund Management & Reconciliation', () => {
           .fn()
           .mockReturnValueOnce({ set: updateRefundSetSpy })
           .mockReturnValueOnce({ set: updatePaymentSetSpy }),
-        select: vi.fn().mockReturnValueOnce({
-          from: vi.fn().mockReturnValueOnce({
-            where: vi.fn().mockReturnValueOnce({
-              for: vi.fn().mockReturnValueOnce({
+        select: vi.fn()
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
+                for: vi.fn().mockReturnValueOnce({
+                  limit: vi.fn().mockResolvedValueOnce([
+                    {
+                      id: 'pay-db-1',
+                      amountPaise: 50000,
+                      refundedAmountPaise: 0,
+                      status: 'captured',
+                    },
+                  ]),
+                }),
+              }),
+            }),
+          })
+          .mockReturnValueOnce({
+            from: vi.fn().mockReturnValueOnce({
+              where: vi.fn().mockReturnValueOnce({
                 limit: vi.fn().mockResolvedValueOnce([
-                  {
-                    id: 'pay-db-1',
-                    amountPaise: 50000,
-                    refundedAmountPaise: 0,
-                    status: 'captured',
-                  },
+                  { name: 'Test Patient', email: 'patient@example.invalid' },
                 ]),
               }),
             }),
           }),
-        }),
       };
 
       (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
 
-      const count = await reconciliationService.reconcileInconsistentPayments();
+      const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
+      const serviceWithEmailOutbox = new PaymentReconciliationService(
+        paymentsService,
+        mockRazorpay,
+        mockEmailOutbox as never,
+      );
+      const count = await serviceWithEmailOutbox.reconcileInconsistentPayments();
 
       expect(count).toBe(1);
       // Confirmed: NO duplicate external refund was called!
@@ -1072,6 +1235,14 @@ describe('Refund Management & Reconciliation', () => {
         expect.objectContaining({
           refundedAmountPaise: 50000,
           status: 'refunded',
+        }),
+      );
+      expect(mockEmailOutbox.enqueue).toHaveBeenCalledWith(
+        mockTx,
+        expect.objectContaining({
+          eventKey: 'refund_processed:refund-timeout-unreconciled:patient-1',
+          eventType: 'refund_processed',
+          payload: expect.objectContaining({ amountPaise: 50000, currency: 'INR', arn: 'ARN_DISCOVERED_123' }),
         }),
       );
     });
@@ -1843,11 +2014,27 @@ describe('Refund Management & Reconciliation', () => {
       });
 
       const mockTx = {
-        update: vi.fn().mockReturnValue({
-          set: vi.fn().mockReturnValue({
-            where: vi.fn().mockResolvedValue([]),
+        update: vi.fn()
+          .mockReturnValueOnce({
+            set: vi.fn().mockReturnValue({
+              where: vi.fn().mockReturnValue({
+                returning: vi.fn().mockResolvedValue([{
+                  id: 'ref-local-1',
+                  patientId: 'patient-1',
+                  appointmentId: 'appt-1',
+                  paymentId: 'pay-pend-1',
+                  amountPaise: 90000,
+                  currency: 'INR',
+                  arn: 'ARN_LIVE_123',
+                }]),
+              }),
+            }),
+          })
+          .mockReturnValueOnce({
+            set: vi.fn().mockReturnValue({
+              where: vi.fn().mockResolvedValue([]),
+            }),
           }),
-        }),
         select: vi.fn().mockReturnValue({
           from: vi.fn().mockReturnValue({
             where: vi.fn().mockReturnValue({
