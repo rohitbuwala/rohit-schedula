@@ -9,14 +9,15 @@ import {
   Optional,
 } from '@nestjs/common';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from '../db/database.js';
-import { appointment, doctorProfile, payment, refund, user } from '../db/schema.js';
+import { appointment, doctorAvailability, doctorProfile, doctorScheduleOverride, payment, refund, user } from '../db/schema.js';
 import { loadEnv, type AppEnvironment } from '../config/env.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { EmailOutboxService, emailEventKey, type OutboxTransaction } from '../notifications/email-outbox.service.js';
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
+import { reserveWithinCapacity } from '../appointments/appointment-conflict.js';
 import { RAZORPAY_TOKEN, type RazorpayInstance } from './razorpay.provider.js';
 import type {
   AdminListPaymentsQueryDto,
@@ -25,6 +26,8 @@ import type {
   CreateRefundDto,
   VerifyPaymentDto,
 } from './payments.schema.js';
+
+type PaymentsTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 @Injectable()
 export class PaymentsService {
@@ -53,6 +56,56 @@ export class PaymentsService {
     if (!this.appointmentReminders) return;
     const timezone = await this.scheduleService?.getTimezoneForDoctor(record.doctorId) ?? 'Asia/Kolkata';
     await this.appointmentReminders.scheduleForAppointment(tx, record, timezone);
+  }
+
+  private async lockDoctorCapacity(tx: PaymentsTransaction, doctorId: string): Promise<void> {
+    await tx.select({ id: doctorProfile.id }).from(doctorProfile)
+      .where(eq(doctorProfile.userId, doctorId)).for('update').limit(1);
+  }
+
+  /**
+   * A cancelled, expired hold no longer consumes capacity. Reacquire the same
+   * doctor row lock as booking before deciding whether a late payment can revive it.
+   */
+  private async hasCapacityForLateCapture(
+    tx: PaymentsTransaction,
+    target: { id: string; doctorId: string; startsAt: Date; endsAt: Date },
+  ): Promise<boolean> {
+    try {
+      await reserveWithinCapacity(
+        () => this.lockDoctorCapacity(tx, target.doctorId),
+        async () => {
+          const timezone = await this.scheduleService?.getTimezoneForDoctor(target.doctorId) ?? 'Asia/Kolkata';
+          const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(target.startsAt);
+          const [weekly] = await tx.select({ capacity: doctorAvailability.capacity }).from(doctorAvailability)
+            .where(eq(doctorAvailability.doctorId, target.doctorId)).limit(1);
+          const [override] = await tx.select({ capacity: doctorScheduleOverride.capacity }).from(doctorScheduleOverride)
+            .where(and(
+              eq(doctorScheduleOverride.doctorId, target.doctorId),
+              eq(doctorScheduleOverride.date, localDate),
+            )).limit(1);
+          return override?.capacity ?? weekly?.capacity ?? 1;
+        },
+        async () => {
+          const now = new Date();
+          return (await tx.select({ id: appointment.id }).from(appointment).where(and(
+            eq(appointment.doctorId, target.doctorId),
+            ne(appointment.id, target.id),
+            or(
+              eq(appointment.status, 'scheduled'),
+              and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now)),
+            ),
+            lt(appointment.startsAt, target.endsAt),
+            gt(appointment.endsAt, target.startsAt),
+          ))).length;
+        },
+        async () => undefined,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof ConflictException) return false;
+      throw error;
+    }
   }
 
   private async enqueuePaymentConfirmationEmails(
@@ -373,22 +426,7 @@ export class PaymentsService {
       // Check if slot was reassigned after hold expired
       let canConfirm = true;
       if (apptRecord.status === 'cancelled') {
-        const [conflict] = await tx
-          .select({ id: appointment.id })
-          .from(appointment)
-          .where(
-            and(
-              eq(appointment.doctorId, apptRecord.doctorId),
-              ne(appointment.id, apptRecord.id),
-              or(eq(appointment.status, 'scheduled'), eq(appointment.status, 'pending_payment')),
-              sql`tstzrange(${appointment.startsAt}, ${appointment.endsAt}, '[)') && tstzrange(${apptRecord.startsAt}, ${apptRecord.endsAt}, '[)')`,
-            ),
-          )
-          .limit(1);
-
-        if (conflict) {
-          canConfirm = false;
-        }
+        canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
       }
 
       if (!canConfirm) {
@@ -855,22 +893,7 @@ export class PaymentsService {
 
         let canConfirm = true;
         if (apptRecord.status === 'cancelled') {
-          const [conflict] = await tx
-            .select({ id: appointment.id })
-            .from(appointment)
-            .where(
-              and(
-                eq(appointment.doctorId, apptRecord.doctorId),
-                ne(appointment.id, apptRecord.id),
-                or(eq(appointment.status, 'scheduled'), eq(appointment.status, 'pending_payment')),
-                sql`tstzrange(${appointment.startsAt}, ${appointment.endsAt}, '[)') && tstzrange(${apptRecord.startsAt}, ${apptRecord.endsAt}, '[)')`,
-              ),
-            )
-            .limit(1);
-
-          if (conflict) {
-            canConfirm = false;
-          }
+          canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
         }
 
         if (!canConfirm) {
