@@ -134,6 +134,59 @@ export const patientProfile = pgTable('patient_profile', {
   index('patient_profile_user_idx').on(table.userId),
 ]);
 
+export const doctorAvailability = pgTable('doctor_availability', {
+  id: text('id').primaryKey(),
+  doctorId: text('doctor_id').notNull().unique().references(() => user.id, { onDelete: 'cascade' }),
+  timezone: text('timezone').notNull().default('UTC'),
+  activeDays: integer('active_days').array().notNull().default([1, 2, 3, 4, 5]),
+  startHour: integer('start_hour').notNull().default(9),
+  endHour: integer('end_hour').notNull().default(17),
+  slotDurationMinutes: integer('slot_duration_minutes').notNull().default(30),
+  schedulingMode: text('scheduling_mode').notNull().default('stream'),
+  capacity: integer('capacity').notNull().default(1),
+  breakStart: text('break_start'),
+  breakEnd: text('break_end'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  check('doctor_availability_scheduling_mode_check', sql`${table.schedulingMode} in ('wave', 'stream')`),
+  check('doctor_availability_capacity_check', sql`${table.capacity} > 0`),
+]);
+
+export const doctorLeave = pgTable('doctor_leave', {
+  id: text('id').primaryKey(),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  date: text('date').notNull(),
+  reason: text('reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('doctor_leave_doctor_date_unique').on(table.doctorId, table.date),
+  index('doctor_leave_doctor_date_idx').on(table.doctorId, table.date),
+]);
+
+export const doctorScheduleOverride = pgTable('doctor_schedule_override', {
+  id: text('id').primaryKey(),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  date: text('date').notNull(),
+  startHour: integer('start_hour').notNull(),
+  endHour: integer('end_hour').notNull(),
+  slotDurationMinutes: integer('slot_duration_minutes').notNull().default(30),
+  schedulingMode: text('scheduling_mode'),
+  capacity: integer('capacity'),
+  breakStart: text('break_start'),
+  breakEnd: text('break_end'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('doctor_schedule_override_doctor_date_unique').on(table.doctorId, table.date),
+  index('doctor_schedule_override_doctor_date_idx').on(table.doctorId, table.date),
+  check('doctor_schedule_override_hour_check', sql`${table.startHour} >= 0 and ${table.endHour} <= 24 and ${table.endHour} > ${table.startHour}`),
+  check('doctor_schedule_override_duration_check', sql`${table.slotDurationMinutes} in (15, 30)`),
+  check('doctor_schedule_override_date_check', sql`${table.date} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+  check('doctor_schedule_override_mode_check', sql`${table.schedulingMode} is null or ${table.schedulingMode} in ('wave', 'stream')`),
+  check('doctor_schedule_override_capacity_check', sql`${table.capacity} is null or ${table.capacity} > 0`),
+]);
+
 export const payment = pgTable('payment', {
   id: text('id').primaryKey(),
   appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
@@ -259,6 +312,9 @@ export const schema = {
   doctorProfile,
   appointment,
   patientProfile,
+  doctorAvailability,
+  doctorLeave,
+  doctorScheduleOverride,
   payment,
   refund,
   emailOutbox,
