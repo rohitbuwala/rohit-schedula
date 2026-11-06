@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   Calendar,
+  CalendarRange,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -129,6 +130,7 @@ export function AppShell({ role, userName, children }: AppShellProps) {
       : role === "doctor"
       ? [
           { label: "Doctor Workspace", href: "/doctor/dashboard", icon: LayoutDashboard },
+          { label: "Schedule & Slots", href: "/doctor/slots", icon: CalendarRange },
           { label: "Practice Profile", href: "/doctor/profile", icon: Stethoscope },
         ]
       : [

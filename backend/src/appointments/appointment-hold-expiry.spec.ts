@@ -90,25 +90,33 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
       });
     };
 
+    const setupCapacityTransaction = (occupiedRows: unknown[] = [], insertResult?: unknown[], insertError?: Error, capacity = 1) => {
+      const queuedResults = [[{}], [{ capacity }], [], occupiedRows]; // doctor lock, weekly config, date override, active occupancy
+      const tx: any = {
+        select: vi.fn(() => {
+          const result = queuedResults.shift() ?? [];
+          const builder: any = {
+            from: vi.fn(() => builder),
+            where: vi.fn(() => builder),
+            for: vi.fn(() => builder),
+            limit: vi.fn(() => builder),
+            then: (resolve: (value: unknown) => unknown) => Promise.resolve(result).then(resolve),
+          };
+          return builder;
+        }),
+        update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn().mockResolvedValue([]) })) })),
+        insert: vi.fn(() => ({ values: vi.fn(() => ({ returning: insertError
+          ? vi.fn().mockRejectedValue(insertError)
+          : vi.fn().mockResolvedValue(insertResult ?? []),
+        })) })),
+      };
+      (db.transaction as any).mockImplementationOnce((callback: (transaction: unknown) => unknown) => callback(tx));
+      return tx;
+    };
+
     it('creates appointment with status pending_payment and 10-minute hold', async () => {
       // 1. Doctor query (findApprovedDoctor)
       setupDoctorMock();
-
-      // 2. Overlap check: returns empty (no overlap)
-      (db.select as any).mockReturnValueOnce({
-        from: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockReturnValueOnce({
-            limit: vi.fn().mockResolvedValueOnce([]),
-          }),
-        }),
-      });
-
-      // 3. Clean up expired holds update
-      (db.update as any).mockReturnValueOnce({
-        set: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockResolvedValueOnce([]),
-        }),
-      });
 
       // 4. DB Insert appointment
       const mockCreated = {
@@ -118,11 +126,7 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
         status: 'pending_payment',
         holdExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
       };
-      (db.insert as any).mockReturnValueOnce({
-        values: vi.fn().mockReturnValueOnce({
-          returning: vi.fn().mockResolvedValueOnce([mockCreated]),
-        }),
-      });
+      const tx = setupCapacityTransaction([], [mockCreated]);
 
       const res = await appointmentsService.createForPatient(patientId, {
         doctorProfileId,
@@ -133,27 +137,14 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
       expect(res.status).toBe('pending_payment');
       expect(res.holdExpiresAt).toBeDefined();
       expect(res.holdExpiresAt.getTime()).toBeGreaterThan(Date.now());
-      expect(db.insert).toHaveBeenCalled();
+      expect(tx.insert).toHaveBeenCalled();
     });
 
     it('rejects booking when slot has an active pending hold', async () => {
       // 1. Doctor query
       setupDoctorMock();
 
-      // 2. Overlap check returns an active hold
-      (db.select as any).mockReturnValueOnce({
-        from: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockReturnValueOnce({
-            limit: vi.fn().mockResolvedValueOnce([
-              {
-                id: 'existing-hold-1',
-                status: 'pending_payment',
-                holdExpiresAt: new Date(Date.now() + 500_000),
-              },
-            ]),
-          }),
-        }),
-      });
+      const tx = setupCapacityTransaction([{ id: 'existing-hold-1' }]);
 
       await expect(
         appointmentsService.createForPatient(patientId, {
@@ -163,38 +154,30 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
         }),
       ).rejects.toThrow(ConflictException);
 
-      expect(db.insert).not.toHaveBeenCalled();
+      expect(tx.insert).not.toHaveBeenCalled();
+    });
+
+    it('allows another hold while a configured wave still has capacity', async () => {
+      setupDoctorMock();
+      const created = {
+        id: 'appt-wave-2', startsAt, endsAt, status: 'pending_payment',
+        holdExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      };
+      const tx = setupCapacityTransaction([{ id: 'existing-pending-hold' }], [created], undefined, 2);
+
+      const result = await appointmentsService.createForPatient(patientId, { doctorProfileId, startsAt, endsAt });
+      expect(result.id).toBe('appt-wave-2');
+      expect(tx.insert).toHaveBeenCalled();
     });
 
     it('converts Postgres exclusion error 23P01 into ConflictException', async () => {
       // 1. Doctor query
       setupDoctorMock();
 
-      // 2. Overlap check returns empty (simulating concurrent race at application layer)
-      (db.select as any).mockReturnValueOnce({
-        from: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockReturnValueOnce({
-            limit: vi.fn().mockResolvedValueOnce([]),
-          }),
-        }),
-      });
-
-      // 3. Clean up expired update
-      (db.update as any).mockReturnValueOnce({
-        set: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockResolvedValueOnce([]),
-        }),
-      });
-
       // 4. DB Insert throws exclusion violation 23P01 from PostgreSQL
       const postgresExclusionError = new Error('exclusion violation');
       (postgresExclusionError as any).code = '23P01';
-
-      (db.insert as any).mockReturnValueOnce({
-        values: vi.fn().mockReturnValueOnce({
-          returning: vi.fn().mockRejectedValueOnce(postgresExclusionError),
-        }),
-      });
+      setupCapacityTransaction([], undefined, postgresExclusionError);
 
       await expect(
         appointmentsService.createForPatient(patientId, {

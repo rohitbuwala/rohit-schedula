@@ -57,8 +57,8 @@ describe('appointmentBookingSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects slots outside clinic operating hours', () => {
-    // 20:00 IST is outside 09:00 - 17:00
+  it('leaves schedule-specific validation to the service so date overrides can be honored', () => {
+    // Schema validates the request shape; the service checks persisted doctor hours.
     const outStart = createZonedDate('2027-01-04', 20, 0, 'Asia/Kolkata').toISOString();
     const outEnd = createZonedDate('2027-01-04', 20, 30, 'Asia/Kolkata').toISOString();
 
@@ -67,6 +67,6 @@ describe('appointmentBookingSchema', () => {
       startsAt: outStart,
       endsAt: outEnd,
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 });
