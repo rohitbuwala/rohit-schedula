@@ -92,6 +92,20 @@
       "when": 1793778979321,
       "tag": "0012_reminder_retention_index",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793865600000,
+      "tag": "0013_doctor_schedule_overrides",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793865600001,
+      "tag": "0014_wave_stream_capacity",
+      "breakpoints": true
     }
   ]
 }

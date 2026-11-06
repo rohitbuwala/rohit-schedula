@@ -1,4 +1,4 @@
-import { appointmentWriteError, createWithConflictHandling, overlaps } from './appointment-conflict.js';
+import { appointmentWriteError, createWithConflictHandling, overlaps, reserveWithinCapacity } from './appointment-conflict.js';
 
 describe('scheduled appointment overlap semantics', () => {
   const base = new Date('2027-01-01T10:00:00Z');
@@ -39,5 +39,63 @@ describe('scheduled appointment overlap semantics', () => {
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find((result) => result.status === 'rejected');
     expect(rejected?.status === 'rejected' && rejected.reason.getStatus()).toBe(409);
+  });
+
+  it('serializes simultaneous reservations and never exceeds configured capacity', async () => {
+    let activeHolds = 0;
+    let tail = Promise.resolve();
+    const reserve = () => {
+      let release!: () => void;
+      const prior = tail;
+      tail = new Promise<void>((resolve) => { release = resolve; });
+      return prior.then(async () => {
+        try {
+          return await reserveWithinCapacity(
+            async () => {}, // The enclosing transaction already owns the database row lock.
+            async () => 2,
+            async () => activeHolds, // Pending-payment holds count toward capacity.
+            async () => { activeHolds++; return 'hold-created'; },
+          );
+        } finally {
+          release();
+        }
+      });
+    };
+
+    const results = await Promise.allSettled([reserve(), reserve(), reserve()]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(2);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(activeHolds).toBe(2);
+  });
+
+  it('serializes late payment recovery against a new booking at capacity one', async () => {
+    let occupied = 0;
+    let tail = Promise.resolve();
+    const acquireDoctorRowLock = async () => {
+      const previous = tail;
+      let release!: () => void;
+      tail = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      return release;
+    };
+    const reserve = async (kind: 'booking' | 'late payment') => {
+      let release: (() => void) | undefined;
+      try {
+        await reserveWithinCapacity(
+          async () => { release = await acquireDoctorRowLock(); },
+          async () => 1,
+          async () => occupied,
+          async () => { occupied += 1; return kind; },
+        );
+        return kind;
+      } finally {
+        release?.();
+      }
+    };
+
+    const results = await Promise.allSettled([reserve('booking'), reserve('late payment')]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(occupied).toBe(1);
   });
 });

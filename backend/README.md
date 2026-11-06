@@ -34,3 +34,9 @@ The reminder worker currently accepts delivery only when `EMAIL_DELIVERY_MODE=te
 ### Migration
 
 The reminder schema is introduced by `drizzle/0010_appointment_reminders.sql`, immutable retry payload fields by `drizzle/0011_reminder_payload_snapshot.sql`, and the retention index by `drizzle/0012_reminder_retention_index.sql`; each has generated metadata in `drizzle/meta/` and a journal entry. Review and apply them in order to the intended development database using the normal migration workflow. This implementation step does not apply migrations; do not start the reminder worker against a database until the migrations are applied.
+
+## Wave and stream capacity
+
+Doctor schedules default to `stream` with capacity `1`, preserving the prior single-booking behavior. Stream availability is generated in fixed 15-minute intervals and does not use appointment duration. In `wave` mode each interval uses the configured 15- or 30-minute appointment duration, is identified as a session, and can accept the configured number of patients; in `stream` mode each interval is a slot with its own identity and capacity. Date overrides can optionally replace the weekly mode and capacity. The availability response returns mode, slot/session identity, capacity, and remaining capacity per interval.
+
+Booking and rescheduling count scheduled appointments and unexpired `pending_payment` holds while holding a PostgreSQL lock on the doctor's profile row in the same transaction as the appointment write. Schedule and override updates use that lock as well. Apply `drizzle/0014_wave_stream_capacity.sql` after migration 0013 before enabling capacity above one; it removes the old capacity-one exclusion constraint because capacity is now enforced transactionally.
