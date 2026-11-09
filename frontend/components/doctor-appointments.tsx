@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   Calendar,
@@ -19,7 +20,6 @@ import {
   parseDoctorAppointmentsResponseBody,
   type DoctorAppointment,
 } from "@/lib/appointment-response";
-import { DoctorScheduleManager } from "@/components/doctor-schedule-manager";
 import { Button } from "@/components/ui/button";
 
 function formatDate(iso: string): string {
@@ -557,7 +557,18 @@ export function DoctorAppointments() {
               )}
 
               {activeTab === "schedule" && (
-                <DoctorScheduleManager />
+                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+                  <div className="mx-auto max-w-xl text-center">
+                    <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-teal-50 text-teal-800">
+                      <Calendar className="h-6 w-6" aria-hidden="true" />
+                    </span>
+                    <h2 className="mt-4 text-xl font-semibold tracking-tight text-slate-900">Manage your availability</h2>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">Set weekly hours, configure Wave or Stream sessions, add one-date overrides and leave, and review upcoming booked times.</p>
+                    <Link href="/doctor/slots" className="mt-5 inline-flex min-h-11 items-center justify-center rounded-xl bg-teal-800 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-teal-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 focus-visible:ring-offset-2">
+                      Open schedule &amp; slots
+                    </Link>
+                  </div>
+                </div>
               )}
             </>
           )}

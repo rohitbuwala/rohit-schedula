@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, lt, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
-import { appointment, doctorProfile, payment, refund, user } from '../db/schema.js';
+import { appointment, doctorAvailability, doctorProfile, doctorScheduleOverride, payment, refund, user } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -12,13 +12,15 @@ import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import type { EmailEventType } from '../notifications/email-templates.js';
 import { canAccessAppointment } from './appointment-access.js';
-import { createWithConflictHandling } from './appointment-conflict.js';
-import { createZonedDate, getAvailableSlots, isBookableSlot } from './appointment-availability.js';
+import { createWithConflictHandling, reserveWithinCapacity } from './appointment-conflict.js';
+import { createZonedDate, getAvailableSlotsWithCapacity, getDurationForDate, isBookableSlot } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
 import type { AppointmentRescheduleInput } from './appointment-reschedule.schema.js';
 import { randomUUID } from 'node:crypto';
+
+type AppointmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 interface PatientAppointmentRow {
   id: string;
@@ -170,6 +172,24 @@ export class AppointmentsService {
     }
   }
 
+  private async lockDoctorCapacity(tx: AppointmentTransaction, doctorId: string): Promise<void> {
+    // A database row lock serializes capacity checks and inserts for this doctor
+    // across all application instances.
+    await tx.select({ id: doctorProfile.id }).from(doctorProfile)
+      .where(eq(doctorProfile.userId, doctorId)).for('update').limit(1);
+  }
+
+  private async getCapacityForDate(tx: AppointmentTransaction, doctorId: string, date: string): Promise<number> {
+    const [weekly] = await tx.select({ capacity: doctorAvailability.capacity }).from(doctorAvailability)
+      .where(eq(doctorAvailability.doctorId, doctorId)).limit(1);
+    const [override] = await tx.select({ capacity: doctorScheduleOverride.capacity }).from(doctorScheduleOverride)
+      .where(and(
+        eq(doctorScheduleOverride.doctorId, doctorId),
+        eq(doctorScheduleOverride.date, date),
+      )).limit(1);
+    return override?.capacity ?? weekly?.capacity ?? 1;
+  }
+
   async getAvailableSlots(patientId: string, input: AppointmentAvailabilityQuery) {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
     if (!doctor) throw new NotFoundException('Approved doctor not found.');
@@ -181,7 +201,10 @@ export class AppointmentsService {
 
     const tz = scheduleConfig.timezone ?? 'Asia/Kolkata';
     const dayStart = createZonedDate(input.date, 0, 0, tz);
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    const nextDate = new Date(`${input.date}T12:00:00.000Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+    const nextDateString = nextDate.toISOString().slice(0, 10);
+    const dayEnd = createZonedDate(nextDateString, 0, 0, tz);
     const now = new Date();
 
     const busy = await db.select({
@@ -204,17 +227,32 @@ export class AppointmentsService {
         ),
       ));
 
-    const slots = getAvailableSlots(input.date, busy, now, {
+    const slots = getAvailableSlotsWithCapacity(input.date, busy, now, {
       ...scheduleConfig,
       timezone: tz,
     });
+
+    const override = scheduleConfig.dateOverrides?.find((entry) => entry.date === input.date);
+    const mode = override?.schedulingMode ?? scheduleConfig.schedulingMode ?? 'stream';
+    const capacity = override?.capacity ?? scheduleConfig.capacity ?? 1;
+    const durationMinutes = getDurationForDate(input.date, scheduleConfig);
 
     return {
       doctorProfileId: input.doctorProfileId,
       date: input.date,
       timezone: tz,
-      durationMinutes: scheduleConfig.slotDurationMinutes ?? 30,
-      slots: slots.map(({ startsAt, endsAt }) => ({ startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() })),
+      durationMinutes,
+      mode,
+      capacity,
+      slots: slots.map(({ startsAt, endsAt, mode: slotMode, slotId, sessionId, capacity: slotCapacity, remainingCapacity }) => ({
+        startsAt: startsAt.toISOString(),
+        endsAt: endsAt.toISOString(),
+        mode: slotMode,
+        slotId: `${doctor.userId}:${slotId}`,
+        sessionId: sessionId ? `${doctor.userId}:${sessionId}` : null,
+        capacity: slotCapacity,
+        remainingCapacity,
+      })),
     };
   }
 
@@ -232,62 +270,62 @@ export class AppointmentsService {
       throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
     }
 
-    const now = new Date();
-
-    // 1. Check for overlapping scheduled or active held appointments
-    const busy = await db.select({ id: appointment.id })
-      .from(appointment)
-      .where(and(
-        eq(appointment.doctorId, doctor.userId),
-        or(
-          eq(appointment.status, 'scheduled'),
-          and(
-            eq(appointment.status, 'pending_payment'),
-            gt(appointment.holdExpiresAt, now),
-          ),
-        ),
-        lt(appointment.startsAt, input.endsAt),
-        gt(appointment.endsAt, input.startsAt),
-      ))
-      .limit(1);
-
-    if (busy.length > 0) {
-      throw new ConflictException('The selected doctor already has a scheduled appointment in that time slot.');
-    }
-
-    // 2. Clean up any expired pending_payment hold in this slot before inserting new hold
-    await db.update(appointment)
-      .set({ status: 'cancelled', updatedAt: new Date() })
-      .where(and(
-        eq(appointment.doctorId, doctor.userId),
-        eq(appointment.status, 'pending_payment'),
-        lte(appointment.holdExpiresAt, now),
-        lt(appointment.startsAt, input.endsAt),
-        gt(appointment.endsAt, input.startsAt),
-      ));
-
-    // 3. Create atomic 10-minute hold with database exclusion constraint protection
-    const holdExpiresAt = new Date(now.getTime() + 10 * 60 * 1000);
-
-    return createWithConflictHandling(async () => {
-      const [created] = await db.insert(appointment).values({
-        id: randomUUID(),
-        patientId,
-        doctorId: doctor.userId,
-        startsAt: input.startsAt,
-        endsAt: input.endsAt,
-        status: 'pending_payment',
-        holdExpiresAt,
-      }).returning({
-        id: appointment.id,
-        startsAt: appointment.startsAt,
-        endsAt: appointment.endsAt,
-        status: appointment.status,
-        holdExpiresAt: appointment.holdExpiresAt,
-      });
-
-      return created;
-    });
+    return createWithConflictHandling(() => db.transaction(async (tx) => {
+      return reserveWithinCapacity(
+        () => this.lockDoctorCapacity(tx, doctor.userId),
+        async () => {
+          const currentConfig = this.scheduleService
+            ? await this.scheduleService.getScheduleConfigForProfile(input.doctorProfileId)
+            : scheduleConfig;
+          const currentTimezone = currentConfig.timezone ?? 'Asia/Kolkata';
+          if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), {
+            ...currentConfig,
+            timezone: currentTimezone,
+          })) {
+            throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
+          }
+          const date = new Intl.DateTimeFormat('en-CA', { timeZone: currentTimezone }).format(input.startsAt);
+          return this.getCapacityForDate(tx, doctor.userId, date);
+        },
+        async () => {
+          const now = new Date();
+          await tx.update(appointment)
+            .set({ status: 'cancelled', updatedAt: now })
+            .where(and(
+              eq(appointment.doctorId, doctor.userId),
+              eq(appointment.status, 'pending_payment'),
+              lte(appointment.holdExpiresAt, now),
+              lt(appointment.startsAt, input.endsAt),
+              gt(appointment.endsAt, input.startsAt),
+            ));
+          const occupied = await tx.select({ id: appointment.id }).from(appointment).where(and(
+            eq(appointment.doctorId, doctor.userId),
+            or(
+              eq(appointment.status, 'scheduled'),
+              and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now)),
+            ),
+            lt(appointment.startsAt, input.endsAt),
+            gt(appointment.endsAt, input.startsAt),
+          ));
+          return occupied.length;
+        },
+        async () => {
+          const now = new Date();
+          const [created] = await tx.insert(appointment).values({
+            id: randomUUID(), patientId, doctorId: doctor.userId,
+            startsAt: input.startsAt, endsAt: input.endsAt,
+            status: 'pending_payment', holdExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+          }).returning({
+            id: appointment.id,
+            startsAt: appointment.startsAt,
+            endsAt: appointment.endsAt,
+            status: appointment.status,
+            holdExpiresAt: appointment.holdExpiresAt,
+          });
+          return created;
+        },
+      );
+    }));
   }
 
   async listMine(actor: AuthenticatedUser) {
@@ -798,6 +836,31 @@ export class AppointmentsService {
         durationMs !== 30 * 60 * 1000
       ) {
         throw new BadRequestException('Appointment duration must be 15 or 30 minutes.');
+      }
+
+      await this.lockDoctorCapacity(tx, record.doctorId);
+      const scheduleConfig = this.scheduleService
+        ? await this.scheduleService.getScheduleConfigForDoctor(record.doctorId)
+        : { timezone: 'Asia/Kolkata', slotDurationMinutes: 30 };
+      const timezone = scheduleConfig.timezone ?? 'Asia/Kolkata';
+      if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), { ...scheduleConfig, timezone })) {
+        throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
+      }
+      const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(input.startsAt);
+      const capacity = await this.getCapacityForDate(tx, record.doctorId, localDate);
+      const now = new Date();
+      const occupied = await tx.select({ id: appointment.id }).from(appointment).where(and(
+        eq(appointment.doctorId, record.doctorId),
+        ne(appointment.id, id),
+        or(
+          eq(appointment.status, 'scheduled'),
+          and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now)),
+        ),
+        lt(appointment.startsAt, input.endsAt),
+        gt(appointment.endsAt, input.startsAt),
+      ));
+      if (occupied.length >= capacity) {
+        throw new ConflictException('The selected appointment window has reached its booking capacity.');
       }
 
       try {

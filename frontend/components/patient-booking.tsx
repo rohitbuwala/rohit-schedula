@@ -43,7 +43,15 @@ type Doctor = {
   profilePhotoUrl: string | null;
 };
 
-type Slot = { startsAt: string; endsAt: string };
+type Slot = {
+  startsAt: string;
+  endsAt: string;
+  mode: "wave" | "stream";
+  slotId: string;
+  sessionId: string | null;
+  capacity: number;
+  remainingCapacity: number;
+};
 
 type PaymentStep =
   | "idle"
@@ -97,10 +105,17 @@ const availabilitySchema = z.object({
   date: z.iso.date(),
   timezone: z.string(),
   durationMinutes: z.number().int().positive(),
+  mode: z.enum(["wave", "stream"]),
+  capacity: z.number().int().positive(),
   slots: z.array(
     z.object({
       startsAt: z.iso.datetime({ offset: true }),
       endsAt: z.iso.datetime({ offset: true }),
+      mode: z.enum(["wave", "stream"]),
+      slotId: z.string().min(1),
+      sessionId: z.string().nullable(),
+      capacity: z.number().int().positive(),
+      remainingCapacity: z.number().int().positive(),
     })
   ),
 });
@@ -1096,6 +1111,9 @@ export function PatientBooking({ name }: { name?: string }) {
                             }`}
                           >
                             {label}
+                            <span className="mt-0.5 block text-[10px] font-medium opacity-75">
+                              {slot.mode === "wave" ? "Wave session" : "Stream slot"} · {slot.remainingCapacity}/{slot.capacity} places
+                            </span>
                           </button>
                         );
                       })}
