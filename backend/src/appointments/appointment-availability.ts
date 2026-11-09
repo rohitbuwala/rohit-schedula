@@ -1,6 +1,7 @@
 import type { AppointmentStatus } from '../db/schema.js';
 
 export const APPOINTMENT_SLOT_MINUTES = 30;
+export const STREAM_SLOT_MINUTES = 15;
 export const OPEN_HOUR = 9;
 export const CLOSE_HOUR = 17;
 export const OPEN_HOUR_UTC = 9;
@@ -19,34 +20,71 @@ export interface AppointmentSlot {
   endsAt: Date;
 }
 
+export type SchedulingMode = 'wave' | 'stream';
+
+export interface AvailableAppointmentSlot extends AppointmentSlot {
+  mode: SchedulingMode;
+  slotId: string;
+  sessionId: string | null;
+  capacity: number;
+  remainingCapacity: number;
+}
+
 export interface DoctorScheduleConfig {
   timezone?: string;
   activeDays?: number[]; // 0=Sun, 1=Mon, ..., 6=Sat (default [1, 2, 3, 4, 5])
   startHour?: number; // default 9
   endHour?: number; // default 17
   slotDurationMinutes?: number; // default 30
+  schedulingMode?: SchedulingMode;
+  capacity?: number;
   breakStart?: string | null; // e.g. "13:00"
   breakEnd?: string | null; // e.g. "14:00"
   leaveDates?: string[]; // array of "YYYY-MM-DD"
+  dateOverrides?: Array<{
+    date: string;
+    startHour: number;
+    endHour: number;
+    slotDurationMinutes: number;
+    schedulingMode?: SchedulingMode | null;
+    capacity?: number | null;
+    breakStart: string | null;
+    breakEnd: string | null;
+  }>;
 }
 
 export function createZonedDate(dateStr: string, hour: number, minute: number, timeZone = 'Asia/Kolkata'): Date {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const localIso = `${dateStr}T${pad(hour)}:${pad(minute)}:00`;
-  if (timeZone === 'Asia/Kolkata' || timeZone === 'IST') {
-    return new Date(`${localIso}+05:30`);
-  }
-  if (timeZone === 'UTC' || !timeZone) {
-    return new Date(`${localIso}Z`);
-  }
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const targetUtc = Date.UTC(year, month - 1, day, hour, minute);
+  if (timeZone === 'UTC' || !timeZone) return new Date(targetUtc);
   try {
-    const d = new Date(`${dateStr}T12:00:00Z`);
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(d);
-    const tzPart = parts.find((p) => p.type === 'timeZoneName')?.value;
-    const offset = tzPart ? tzPart.replace('GMT', '') : 'Z';
-    return new Date(`${localIso}${offset || 'Z'}`);
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    });
+    const offsets = new Set<number>();
+    const probeHours = [-36, -24, -12, 0, 12, 24, 36];
+    for (const probeHour of probeHours) {
+      const probe = new Date(targetUtc + probeHour * 60 * 60_000);
+      const parts = Object.fromEntries(formatter.formatToParts(probe).map(({ type, value }) => [type, Number(value)]));
+      const representedUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+      offsets.add(representedUtc - probe.getTime());
+    }
+
+    const matchingInstants = [...offsets]
+      .map((offset) => targetUtc - offset)
+      .filter((candidate) => {
+        const parts = Object.fromEntries(formatter.formatToParts(new Date(candidate)).map(({ type, value }) => [type, Number(value)]));
+        return parts.year === year && parts.month === month && parts.day === day &&
+          parts.hour === hour && parts.minute === minute && parts.second === 0;
+      })
+      .sort((left, right) => left - right);
+
+    // A spring-forward gap has no matching instant. For a fall-back fold,
+    // choose the earlier instant so the same local time is always deterministic.
+    return matchingInstants.length > 0 ? new Date(matchingInstants[0]!) : new Date(Number.NaN);
   } catch {
-    return new Date(`${localIso}Z`);
+    return new Date(targetUtc);
   }
 }
 
@@ -70,26 +108,32 @@ export function candidateSlotsForDate(
     return [];
   }
 
+  const override = config?.dateOverrides?.find((entry) => entry.date === date);
   const timeZone = config?.timezone ?? 'UTC';
   const dayOfWeek = getDayOfWeekForDate(date, timeZone);
 
   // Active days: defaults to weekdays (1 through 5: Mon..Fri)
-  const activeDays = config?.activeDays ?? [1, 2, 3, 4, 5];
+  const activeDays = override ? [dayOfWeek] : (config?.activeDays ?? [1, 2, 3, 4, 5]);
   if (!activeDays.includes(dayOfWeek)) {
     return [];
   }
 
-  const startHour = config?.startHour ?? OPEN_HOUR;
-  const endHour = config?.endHour ?? CLOSE_HOUR;
-  const durationMinutes = config?.slotDurationMinutes ?? APPOINTMENT_SLOT_MINUTES;
+  const startHour = override?.startHour ?? config?.startHour ?? OPEN_HOUR;
+  const endHour = override?.endHour ?? config?.endHour ?? CLOSE_HOUR;
+  const mode = override?.schedulingMode ?? config?.schedulingMode;
+  const durationMinutes = mode === 'stream'
+    ? STREAM_SLOT_MINUTES
+    : override?.slotDurationMinutes ?? config?.slotDurationMinutes ?? APPOINTMENT_SLOT_MINUTES;
   const slotMs = durationMinutes * 60_000;
 
   // Parse break hours if configured
   let breakStartMinutes: number | null = null;
   let breakEndMinutes: number | null = null;
-  if (config?.breakStart && config?.breakEnd) {
-    const [bsh, bsm] = config.breakStart.split(':').map(Number);
-    const [beh, bem] = config.breakEnd.split(':').map(Number);
+  const breakStart = override ? override.breakStart : config?.breakStart;
+  const breakEnd = override ? override.breakEnd : config?.breakEnd;
+  if (breakStart && breakEnd) {
+    const [bsh, bsm] = breakStart.split(':').map(Number);
+    const [beh, bem] = breakEnd.split(':').map(Number);
     if (!Number.isNaN(bsh) && !Number.isNaN(bsm) && !Number.isNaN(beh) && !Number.isNaN(bem)) {
       breakStartMinutes = bsh * 60 + bsm;
       breakEndMinutes = beh * 60 + bem;
@@ -114,6 +158,7 @@ export function candidateSlotsForDate(
     const hour = Math.floor(current / 60);
     const minute = current % 60;
     const startsAt = createZonedDate(date, hour, minute, timeZone);
+    if (!Number.isFinite(startsAt.getTime())) continue;
     const endsAt = new Date(startsAt.getTime() + slotMs);
 
     if (startsAt.getTime() > now.getTime()) {
@@ -152,6 +197,55 @@ export function getAvailableSlots(
   );
 }
 
+export function getAvailableSlotsWithCapacity(
+  date: string,
+  appointments: ExistingAppointment[],
+  now = new Date(),
+  config?: DoctorScheduleConfig,
+): AvailableAppointmentSlot[] {
+  const override = config?.dateOverrides?.find((entry) => entry.date === date);
+  const mode = override?.schedulingMode ?? config?.schedulingMode ?? 'stream';
+  const capacity = override?.capacity ?? config?.capacity ?? 1;
+  return candidateSlotsForDate(date, now, config).flatMap((slot) => {
+    const occupied = appointments.filter((existing) =>
+      isAppointmentBusy(existing, now) &&
+      slot.startsAt.getTime() < existing.endsAt.getTime() &&
+      existing.startsAt.getTime() < slot.endsAt.getTime(),
+    ).length;
+    const remainingCapacity = Math.max(0, capacity - occupied);
+    if (remainingCapacity === 0) return [];
+    const startsAt = slot.startsAt.toISOString();
+    const endsAt = slot.endsAt.toISOString();
+    const slotId = `${startsAt}/${endsAt}`;
+    return [{
+      ...slot,
+      mode,
+      slotId,
+      sessionId: mode === 'wave' ? slotId : null,
+      capacity,
+      remainingCapacity,
+    }];
+  });
+}
+
+export function getCapacityForDate(date: string, config?: DoctorScheduleConfig): number {
+  const override = config?.dateOverrides?.find((entry) => entry.date === date);
+  return override?.capacity ?? config?.capacity ?? 1;
+}
+
+export function getDurationForDate(date: string, config?: DoctorScheduleConfig): number {
+  const override = config?.dateOverrides?.find((entry) => entry.date === date);
+  const mode = override?.schedulingMode ?? config?.schedulingMode;
+  return mode === 'stream'
+    ? STREAM_SLOT_MINUTES
+    : override?.slotDurationMinutes ?? config?.slotDurationMinutes ?? APPOINTMENT_SLOT_MINUTES;
+}
+
+export function getModeForDate(date: string, config?: DoctorScheduleConfig): SchedulingMode {
+  const override = config?.dateOverrides?.find((entry) => entry.date === date);
+  return override?.schedulingMode ?? config?.schedulingMode ?? 'stream';
+}
+
 export function isBookableSlot(
   startsAt: Date,
   endsAt: Date,
@@ -165,19 +259,9 @@ export function isBookableSlot(
   const tz = config?.timezone ?? 'Asia/Kolkata';
   const dateInTz = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(startsAt);
 
-  if (config?.slotDurationMinutes) {
-    return candidateSlotsForDate(dateInTz, now, { ...config, timezone: tz }).some(
-      (slot) =>
-        slot.startsAt.getTime() === startsAt.getTime() &&
-        slot.endsAt.getTime() === endsAt.getTime()
-    );
-  }
-
-  // When slot duration is not specified in config, accept either 15-minute or 30-minute slots
-  const slots15 = candidateSlotsForDate(dateInTz, now, { ...config, timezone: tz, slotDurationMinutes: 15 });
-  if (slots15.some((s) => s.startsAt.getTime() === startsAt.getTime() && s.endsAt.getTime() === endsAt.getTime())) {
-    return true;
-  }
-  const slots30 = candidateSlotsForDate(dateInTz, now, { ...config, timezone: tz, slotDurationMinutes: 30 });
-  return slots30.some((s) => s.startsAt.getTime() === startsAt.getTime() && s.endsAt.getTime() === endsAt.getTime());
+  return candidateSlotsForDate(dateInTz, now, { ...config, timezone: tz }).some(
+    (slot) =>
+      slot.startsAt.getTime() === startsAt.getTime() &&
+      slot.endsAt.getTime() === endsAt.getTime()
+  );
 }

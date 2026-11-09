@@ -28,3 +28,18 @@ export async function createWithConflictHandling<T>(insert: () => Promise<T>): P
     throw error;
   }
 }
+
+export async function reserveWithinCapacity<T>(
+  acquireDatabaseLock: () => Promise<void>,
+  readCapacity: () => Promise<number>,
+  countActiveAppointments: () => Promise<number>,
+  createHold: () => Promise<T>,
+): Promise<T> {
+  await acquireDatabaseLock();
+  const capacity = await readCapacity();
+  const occupied = await countActiveAppointments();
+  if (occupied >= capacity) {
+    throw new ConflictException('The selected appointment window has reached its booking capacity.');
+  }
+  return createHold();
+}
