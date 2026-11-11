@@ -9,6 +9,7 @@ export interface CreateNotificationParams {
   message: string;
   type: NotificationType;
   appointmentId?: string | null;
+  scheduleRequestId?: string | null;
 }
 
 @Injectable()
@@ -27,10 +28,18 @@ export class NotificationsService {
       type: params.type,
       read: false,
       appointmentId: params.appointmentId ?? null,
+      scheduleRequestId: params.scheduleRequestId ?? null,
       createdAt: new Date().toISOString(),
     };
 
     const currentList = this.userNotifications.get(params.userId) ?? [];
+    const duplicate = currentList.find((item) =>
+      !item.read &&
+      item.type === params.type &&
+      item.appointmentId === (params.appointmentId ?? null) &&
+      item.scheduleRequestId === (params.scheduleRequestId ?? null) &&
+      item.title === params.title);
+    if (duplicate) return duplicate;
     // Prepend new notification
     currentList.unshift(record);
     // Keep max 100 recent notifications per user

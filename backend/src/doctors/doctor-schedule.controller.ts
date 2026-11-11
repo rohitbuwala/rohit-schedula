@@ -20,6 +20,8 @@ import {
   doctorScheduleUpdateSchema,
   doctorLeaveInputSchema,
   doctorScheduleOverrideInputSchema,
+  scheduleAlternativeSelectionSchema,
+  scheduleRequestRejectionSchema,
 } from './doctor-schedule.schema.js';
 
 @Controller('api/doctor/schedule')
@@ -49,6 +51,60 @@ export class DoctorScheduleController {
       throw new BadRequestException(parsed.error.flatten());
     }
     return this.scheduleService.checkConflicts(doctor.id, parsed.data);
+  }
+
+  @Post('requests')
+  createScheduleRequest(@CurrentUser() doctor: AuthenticatedUser, @Body() body: unknown) {
+    const parsed = doctorScheduleUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.flatten());
+    }
+    return this.scheduleService.createScheduleRequest(doctor.id, parsed.data);
+  }
+
+  @Get('requests')
+  listScheduleRequests(@CurrentUser() doctor: AuthenticatedUser) {
+    return this.scheduleService.listScheduleRequests(doctor.id);
+  }
+
+  @Get('requests/:id')
+  getScheduleRequest(@CurrentUser() doctor: AuthenticatedUser, @Param('id') id: string) {
+    return this.scheduleService.getScheduleRequest(doctor.id, id);
+  }
+
+  @Post('requests/:id/approve')
+  approveScheduleRequest(@CurrentUser() doctor: AuthenticatedUser, @Param('id') id: string) {
+    return this.scheduleService.approveScheduleRequest(doctor.id, id);
+  }
+
+  @Post('requests/:requestId/appointments/:affectedAppointmentId/alternatives')
+  selectScheduleAlternatives(
+    @CurrentUser() doctor: AuthenticatedUser,
+    @Param('requestId') requestId: string,
+    @Param('affectedAppointmentId') affectedAppointmentId: string,
+    @Body() body: unknown,
+  ) {
+    const parsed = scheduleAlternativeSelectionSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    return this.scheduleService.selectScheduleAlternatives(
+      doctor.id,
+      requestId,
+      affectedAppointmentId,
+      parsed.data.alternativeIds,
+    );
+  }
+
+  @Post('requests/:id/reject')
+  rejectScheduleRequest(
+    @CurrentUser() doctor: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    const parsed = scheduleRequestRejectionSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException(parsed.error.flatten());
+    }
+    return this.scheduleService.rejectScheduleRequest(doctor.id, id, parsed.data.reason);
   }
 
   @Post('leave')

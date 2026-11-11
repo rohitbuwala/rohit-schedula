@@ -26,6 +26,30 @@ export const refundStatus = pgEnum('refund_status', [
 ]);
 export type RefundStatus = typeof refundStatus.enumValues[number];
 
+export const scheduleChangeRequestStatus = pgEnum('schedule_change_request_status', [
+  'pending',
+  'published',
+  'expired',
+  'cancelled',
+]);
+export type ScheduleChangeRequestStatus = typeof scheduleChangeRequestStatus.enumValues[number];
+
+export const scheduleChangeConsentStatus = pgEnum('schedule_change_consent_status', [
+  'pending',
+  'accepted',
+  'declined',
+  'expired',
+]);
+export type ScheduleChangeConsentStatus = typeof scheduleChangeConsentStatus.enumValues[number];
+
+export const scheduleChangeResolutionStatus = pgEnum('schedule_change_resolution_status', [
+  'pending',
+  'rescheduled',
+  'cancelled',
+  'expired',
+]);
+export type ScheduleChangeResolutionStatus = typeof scheduleChangeResolutionStatus.enumValues[number];
+
 export const user = pgTable('user', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
@@ -304,6 +328,81 @@ export const appointmentReminder = pgTable('appointment_reminder', {
   check('appointment_reminder_attempt_count_check', sql`${table.attemptCount} >= 0`),
 ]);
 
+export const scheduleChangeRequest = pgTable('schedule_change_request', {
+  id: text('id').primaryKey(),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  proposedSchedule: jsonb('proposed_schedule').$type<Record<string, unknown>>().notNull(),
+  status: scheduleChangeRequestStatus('status').notNull().default('pending'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  approvedAt: timestamp('approved_at', { withTimezone: true }),
+  approvedBy: text('approved_by').references(() => user.id, { onDelete: 'restrict' }),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
+  expiredAt: timestamp('expired_at', { withTimezone: true }),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  cancelledBy: text('cancelled_by').references(() => user.id, { onDelete: 'restrict' }),
+  cancellationReason: text('cancellation_reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('schedule_change_request_doctor_status_idx').on(table.doctorId, table.status),
+  index('schedule_change_request_expiry_idx').on(table.status, table.expiresAt),
+]);
+
+export const scheduleChangeAppointment = pgTable('schedule_change_appointment', {
+  id: text('id').primaryKey(),
+  requestId: text('request_id').notNull().references(() => scheduleChangeRequest.id, { onDelete: 'cascade' }),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
+  originalStartsAt: timestamp('original_starts_at', { withTimezone: true }).notNull(),
+  originalEndsAt: timestamp('original_ends_at', { withTimezone: true }).notNull(),
+  consentStatus: scheduleChangeConsentStatus('consent_status').notNull().default('pending'),
+  resolutionStatus: scheduleChangeResolutionStatus('resolution_status').notNull().default('pending'),
+  selectedAlternativeId: text('selected_alternative_id'),
+  respondedAt: timestamp('responded_at', { withTimezone: true }),
+  responseReason: text('response_reason'),
+  resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('schedule_change_appointment_request_unique').on(table.requestId, table.appointmentId),
+  index('schedule_change_appointment_request_consent_idx').on(table.requestId, table.consentStatus),
+  index('schedule_change_appointment_appointment_idx').on(table.appointmentId),
+  check('schedule_change_appointment_time_order_check', sql`${table.originalEndsAt} > ${table.originalStartsAt}`),
+]);
+
+export const scheduleChangeAlternative = pgTable('schedule_change_alternative', {
+  id: text('id').primaryKey(),
+  affectedAppointmentId: text('affected_appointment_id')
+    .notNull()
+    .references(() => scheduleChangeAppointment.id, { onDelete: 'cascade' }),
+  startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
+  endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
+  rank: integer('rank').notNull(),
+  selectedAt: timestamp('selected_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('schedule_change_alternative_slot_unique').on(
+    table.affectedAppointmentId, table.startsAt, table.endsAt,
+  ),
+  index('schedule_change_alternative_affected_rank_idx').on(table.affectedAppointmentId, table.rank),
+  check('schedule_change_alternative_time_order_check', sql`${table.endsAt} > ${table.startsAt}`),
+  check('schedule_change_alternative_rank_check', sql`${table.rank} > 0`),
+]);
+
+export const appointmentHistory = pgTable('appointment_history', {
+  id: text('id').primaryKey(),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'cascade' }),
+  actorId: text('actor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  action: text('action').notNull(),
+  previousStartsAt: timestamp('previous_starts_at', { withTimezone: true }),
+  previousEndsAt: timestamp('previous_ends_at', { withTimezone: true }),
+  newStartsAt: timestamp('new_starts_at', { withTimezone: true }),
+  newEndsAt: timestamp('new_ends_at', { withTimezone: true }),
+  reason: text('reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('appointment_history_appointment_idx').on(table.appointmentId, table.createdAt),
+]);
+
 export const schema = {
   user,
   session,
@@ -319,4 +418,8 @@ export const schema = {
   refund,
   emailOutbox,
   appointmentReminder,
+  scheduleChangeRequest,
+  scheduleChangeAppointment,
+  scheduleChangeAlternative,
+  appointmentHistory,
 };
