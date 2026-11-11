@@ -65,6 +65,16 @@ export const doctorScheduleOverrideInputSchema = z.object({
   path: ['slotDurationMinutes'],
 });
 
+export const scheduleRequestRejectionSchema = z.object({
+  reason: z.string().trim().min(1).max(500),
+}).strict();
+
+export const scheduleAlternativeSelectionSchema = z.object({
+  alternativeIds: z.array(z.uuid()).min(1).max(5),
+}).strict();
+
 export type DoctorScheduleUpdate = z.infer<typeof doctorScheduleUpdateSchema>;
 export type DoctorLeaveInput = z.infer<typeof doctorLeaveInputSchema>;
 export type DoctorScheduleOverrideInput = z.infer<typeof doctorScheduleOverrideInputSchema>;
+export type ScheduleRequestRejection = z.infer<typeof scheduleRequestRejectionSchema>;
+export type ScheduleAlternativeSelection = z.infer<typeof scheduleAlternativeSelectionSchema>;

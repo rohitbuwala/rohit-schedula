@@ -19,5 +19,6 @@ export interface NotificationRecord {
   type: NotificationType;
   read: boolean;
   appointmentId?: string | null;
+  scheduleRequestId?: string | null;
   createdAt: string;
 }

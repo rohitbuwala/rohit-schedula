@@ -1,4 +1,4 @@
-import { candidateSlotsForDate, createZonedDate, getAvailableSlots, getAvailableSlotsWithCapacity, getDurationForDate, isBookableSlot } from './appointment-availability.js';
+import { candidateSlotsForDate, createZonedDate, findCapacityConflicts, getAvailableSlots, getAvailableSlotsWithCapacity, getBookableRescheduleWindow, getDurationForDate, isAppointmentCompatibleWithSchedule, isBookableSlot } from './appointment-availability.js';
 
 describe('appointment availability', () => {
   const now = new Date('2027-01-01T00:00:00.000Z');
@@ -33,6 +33,36 @@ describe('appointment availability', () => {
     expect(options[0]).toMatchObject({ mode: 'wave', capacity: 3, remainingCapacity: 1 });
     expect(options[0]?.slotId).toBeTruthy();
     expect(options[0]?.sessionId).toBe(options[0]?.slotId);
+  });
+
+  it('uses strict interval overlap for 30-minute Wave slot occupancy', () => {
+    const config = {
+      timezone: 'UTC',
+      activeDays: [1, 2, 3, 4, 5],
+      startHour: 9,
+      endHour: 10,
+      slotDurationMinutes: 30,
+      schedulingMode: 'wave' as const,
+      capacity: 2,
+    };
+    const firstSlot = (appointments: Parameters<typeof getAvailableSlotsWithCapacity>[1]) =>
+      getAvailableSlotsWithCapacity('2027-01-04', appointments, now, config)
+        .find(({ startsAt }) => startsAt.toISOString() === '2027-01-04T09:00:00.000Z');
+
+    expect(firstSlot([
+      { startsAt: new Date('2027-01-04T09:00:00Z'), endsAt: new Date('2027-01-04T09:15:00Z'), status: 'scheduled' },
+    ])?.remainingCapacity).toBe(1);
+    expect(firstSlot([
+      { startsAt: new Date('2027-01-04T09:00:00Z'), endsAt: new Date('2027-01-04T09:15:00Z'), status: 'scheduled' },
+      { startsAt: new Date('2027-01-04T09:15:00Z'), endsAt: new Date('2027-01-04T09:30:00Z'), status: 'scheduled' },
+    ])).toBeUndefined();
+    expect(firstSlot([
+      { startsAt: new Date('2027-01-04T08:30:00Z'), endsAt: new Date('2027-01-04T09:00:00Z'), status: 'scheduled' },
+      { startsAt: new Date('2027-01-04T09:30:00Z'), endsAt: new Date('2027-01-04T10:00:00Z'), status: 'scheduled' },
+    ])?.remainingCapacity).toBe(2);
+    expect(firstSlot([
+      { startsAt: new Date('2027-01-04T09:00:00Z'), endsAt: new Date('2027-01-04T09:15:00Z'), status: 'cancelled' },
+    ])?.remainingCapacity).toBe(2);
   });
 
   it('generates Stream slots in fixed 15-minute intervals without using appointment duration', () => {
@@ -141,11 +171,58 @@ describe('appointment availability', () => {
     expect(isBookableSlot(new Date('2027-01-04T09:15:00Z'), new Date('2027-01-04T09:45:00Z'), now)).toBe(false);
   });
 
+  it('validates 15-minute reschedule alternatives within 30-minute Wave sessions', () => {
+    const config = { timezone: 'UTC', activeDays: [1, 2, 3, 4, 5], startHour: 9, endHour: 10,
+      slotDurationMinutes: 30, schedulingMode: 'wave' as const, capacity: 2 };
+    const firstHalfStart = new Date('2027-01-04T09:00:00Z');
+    const firstHalfEnd = new Date('2027-01-04T09:15:00Z');
+    const secondHalfStart = new Date('2027-01-04T09:15:00Z');
+    const secondHalfEnd = new Date('2027-01-04T09:30:00Z');
+
+    expect(isBookableSlot(firstHalfStart, firstHalfEnd, now, config)).toBe(false);
+    expect(getBookableRescheduleWindow(firstHalfStart, firstHalfEnd, now, config)).toEqual({
+      startsAt: new Date('2027-01-04T09:00:00Z'),
+      endsAt: new Date('2027-01-04T09:30:00Z'),
+    });
+    expect(getBookableRescheduleWindow(secondHalfStart, secondHalfEnd, now, config)).toEqual({
+      startsAt: new Date('2027-01-04T09:00:00Z'),
+      endsAt: new Date('2027-01-04T09:30:00Z'),
+    });
+    expect(getBookableRescheduleWindow(
+      new Date('2027-01-04T09:10:00Z'), new Date('2027-01-04T09:25:00Z'), now, config,
+    )).toBeNull();
+  });
+
   it('respects custom start and end hours', () => {
     const slots = candidateSlotsForDate('2027-01-04', now, { startHour: 10, endHour: 14, schedulingMode: 'wave' });
     expect(slots).toHaveLength(8);
     expect(slots[0]?.startsAt.toISOString()).toBe('2027-01-04T10:00:00.000Z');
     expect(slots.at(-1)?.endsAt.toISOString()).toBe('2027-01-04T14:00:00.000Z');
+  });
+
+  it('reflects schedule shrinking and expansion in generated slots', () => {
+    const shrinking = candidateSlotsForDate('2027-01-04', now, {
+      timezone: 'UTC',
+      activeDays: [1, 2, 3, 4, 5],
+      startHour: 10,
+      endHour: 11,
+      schedulingMode: 'wave',
+      slotDurationMinutes: 30,
+    });
+    expect(shrinking).toHaveLength(2);
+    expect(shrinking.at(-1)?.endsAt.toISOString()).toBe('2027-01-04T11:00:00.000Z');
+
+    const expanded = candidateSlotsForDate('2027-01-04', now, {
+      timezone: 'UTC',
+      activeDays: [1, 2, 3, 4, 5],
+      startHour: 9,
+      endHour: 12,
+      schedulingMode: 'wave',
+      slotDurationMinutes: 30,
+    });
+    expect(expanded).toHaveLength(6);
+    expect(expanded[0]?.startsAt.toISOString()).toBe('2027-01-04T09:00:00.000Z');
+    expect(expanded.at(-1)?.endsAt.toISOString()).toBe('2027-01-04T12:00:00.000Z');
   });
 
   it('excludes slots falling within configured break hours', () => {
@@ -276,5 +353,73 @@ describe('appointment availability', () => {
     // Invalid duration (e.g. 10 minutes) should be rejected
     const end10 = new Date('2027-01-04T03:40:00.000Z');
     expect(isBookableSlot(start15, end10, now)).toBe(false);
+  });
+
+  it('treats a 15-minute appointment as a conflict with 30-minute Wave slots', () => {
+    const start = new Date('2027-01-04T03:30:00.000Z');
+    const end = new Date('2027-01-04T03:45:00.000Z');
+
+    expect(isAppointmentCompatibleWithSchedule(start, end, now, {
+      timezone: 'Asia/Kolkata',
+      activeDays: [1, 2, 3, 4, 5],
+      startHour: 9,
+      endHour: 17,
+      slotDurationMinutes: 30,
+      schedulingMode: 'wave',
+      capacity: 1,
+    })).toBe(false);
+  });
+
+  describe('capacity-aware conflict detection', () => {
+    it('detects a capacity breach when a Wave slot has more bookings than the proposed capacity', () => {
+      const config = {
+        timezone: 'UTC',
+        activeDays: [1, 2, 3, 4, 5],
+        startHour: 9,
+        endHour: 10,
+        slotDurationMinutes: 30,
+        schedulingMode: 'wave' as const,
+        capacity: 1,
+      };
+      // Three appointments in the same 09:00-09:30 UTC slot on 2027-01-06 (Mon)
+      const appointments = [
+        { startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+        { startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+        { startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+      ];
+      // With capacity=1, slot should be at 0 remaining capacity
+      const slots = getAvailableSlotsWithCapacity('2027-01-06', appointments, now, config);
+      const firstSlot = slots.find(s => s.startsAt.toISOString() === '2027-01-06T09:00:00.000Z');
+      expect(firstSlot).toBeUndefined(); // completely consumed
+
+      // Each individual appointment is bookable (compatible with slot time), but
+      // collectively they exceed capacity. isAppointmentCompatibleWithSchedule
+      // only checks time-fit, not capacity, so all 3 appear "compatible".
+      expect(isAppointmentCompatibleWithSchedule(
+        appointments[0].startsAt, appointments[0].endsAt, now, config,
+      )).toBe(true);
+    });
+
+    it('correctly reports capacity-exceeding appointments via findCapacityConflicts', () => {
+      const config = {
+        timezone: 'UTC',
+        activeDays: [1, 2, 3, 4, 5],
+        startHour: 9,
+        endHour: 10,
+        slotDurationMinutes: 30,
+        schedulingMode: 'wave' as const,
+        capacity: 1,
+      };
+      const appointments = [
+        { id: 'a1', startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+        { id: 'a2', startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+        { id: 'a3', startsAt: new Date('2027-01-06T09:00:00Z'), endsAt: new Date('2027-01-06T09:30:00Z'), status: 'scheduled' as const },
+      ];
+      const conflicts = findCapacityConflicts(appointments, now, config);
+      // capacity=1, 3 appointments in the same slot => 2 of them are excess
+      expect(conflicts.length).toBe(2);
+      // Each conflict should have a reason mentioning capacity
+      expect(conflicts.every((c: any) => c.reason.includes('capacity'))).toBe(true);
+    });
   });
 });
