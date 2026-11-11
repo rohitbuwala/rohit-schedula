@@ -51,6 +51,44 @@ interface DoctorScheduleData {
   }>;
 }
 
+interface ScheduleRequestSummary {
+  id: string;
+  status: "pending" | "published" | "cancelled" | "expired";
+  expiresAt: string;
+  approvedAt: string | null;
+  publicationBlocked?: boolean;
+  publicationBlockers?: Array<{ id: string; reason: string }>;
+  affectedAppointments: Array<{
+    id: string;
+    consentStatus: "pending" | "accepted" | "declined";
+    resolutionStatus: string;
+    appointmentId: string;
+    originalStartsAt: string;
+    originalEndsAt: string;
+    conflictReason: string;
+    patient: { id: string; name: string };
+    appointment: {
+      id: string;
+      startsAt: string;
+      endsAt: string;
+      status: "pending_payment" | "scheduled" | "cancelled" | "completed";
+    };
+    payment: { status: "created" | "captured" | "failed" | "refunded"; statusDisplay: string } | null;
+    alternatives: Array<{
+      id: string;
+      startsAt: string;
+      endsAt: string;
+      rank: number;
+    }>;
+  }>;
+}
+
+interface ProposalEditor {
+  requestId: string;
+  affectedAppointmentId: string;
+  alternativeIds: string[];
+}
+
 const COMMON_TIMEZONES = [
   "UTC",
   "Asia/Kolkata",
@@ -84,6 +122,9 @@ export function DoctorScheduleManager() {
   const [notice, setNotice] = useState("");
   const [appointmentError, setAppointmentError] = useState("");
   const [scheduleType, setScheduleType] = useState<"recurring" | "single">("recurring");
+  const [scheduleRequests, setScheduleRequests] = useState<ScheduleRequestSummary[]>([]);
+  const [proposalEditor, setProposalEditor] = useState<ProposalEditor | null>(null);
+  const [savingProposal, setSavingProposal] = useState(false);
 
   // Schedule form state
   const [timezone, setTimezone] = useState("UTC");
@@ -122,13 +163,16 @@ export function DoctorScheduleManager() {
     let active = true;
     async function loadSchedule() {
       try {
-        const [res, appointmentsRes] = await Promise.all([
+        const [res, appointmentsRes, requestsRes] = await Promise.all([
           fetch(`${backendUrl}/api/doctor/schedule`, { credentials: "include", cache: "no-store" }),
           fetch(`${backendUrl}/api/appointments/me`, { credentials: "include", cache: "no-store" }),
+          fetch(`${backendUrl}/api/doctor/schedule/requests`, { credentials: "include", cache: "no-store" }),
         ]);
         if (!res.ok) throw new Error("Could not load schedule settings.");
         const data: DoctorScheduleData = await res.json();
         let upcoming: DoctorAppointment[] = [];
+        let requests: ScheduleRequestSummary[] = [];
+        if (requestsRes.ok) requests = await requestsRes.json();
         let nextAppointmentError = "";
         if (appointmentsRes.ok) {
           const body = await appointmentsRes.text();
@@ -144,6 +188,7 @@ export function DoctorScheduleManager() {
         }
         if (active) {
           setUpcomingAppointments(upcoming);
+          setScheduleRequests(requests);
           setAppointmentError(nextAppointmentError);
           setSchedule(data);
           setTimezone(data.timezone || "UTC");
@@ -219,8 +264,8 @@ export function DoctorScheduleManager() {
     setError("");
     setNotice("");
     try {
-      const res = await fetch(`${backendUrl}/api/doctor/schedule`, {
-        method: "PUT",
+      const res = await fetch(`${backendUrl}/api/doctor/schedule/requests`, {
+        method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -235,15 +280,164 @@ export function DoctorScheduleManager() {
           breakEnd: breakEnd.trim() || null,
         }),
       });
-      if (!res.ok) throw new Error("Could not update schedule settings.");
-      const updated: DoctorScheduleData = await res.json();
-      setSchedule(updated);
-      setNotice("Your practice schedule and availability were saved successfully.");
+      const body: unknown = await res.json();
+      if (!res.ok) {
+        const message = typeof body === "object" && body !== null && "message" in body && typeof body.message === "string"
+          ? body.message
+          : "Could not create a schedule change request.";
+        throw new Error(message);
+      }
+      const responseBody = body as {
+        request: ScheduleRequestSummary;
+        affectedAppointments?: ScheduleRequestSummary["affectedAppointments"];
+      };
+      const created = {
+        ...responseBody.request,
+        affectedAppointments: responseBody.affectedAppointments ?? [],
+      };
+      const refreshed = await fetch(`${backendUrl}/api/doctor/schedule/requests`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!refreshed.ok) throw new Error("Schedule change request created, but affected appointments could not be loaded.");
+      const requests = await refreshed.json() as ScheduleRequestSummary[];
+      const latestRequest = requests.find((request) => request.id === created.id);
+      const requestWithAffected = latestRequest ?? created;
+      setScheduleRequests([
+        requestWithAffected,
+        ...requests.filter((request) => request.id !== created.id),
+      ]);
+      setNotice(created.affectedAppointments.length
+        ? "Schedule change request created. Review the affected appointments, then approve it to request patient responses."
+        : "Schedule change request created. Approve it to publish the new schedule.");
       setConflictResult(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update schedule.");
     } finally {
       setSaving(false);
+    }
+
+  }
+
+  async function handleApproveRequest(requestId: string) {
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(`${backendUrl}/api/doctor/schedule/requests/${requestId}/approve`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const body: unknown = await res.json();
+      if (!res.ok) {
+        const message = typeof body === "object" && body !== null && "message" in body && typeof body.message === "string"
+          ? body.message
+          : "Could not approve the schedule change request.";
+        throw new Error(message);
+      }
+
+      const approved = body as ScheduleRequestSummary;
+      setScheduleRequests((current) => current.map((request) =>
+        request.id === requestId ? { ...request, ...approved } : request));
+      setNotice(approved.status === "published"
+        ? "The schedule change was approved and published."
+        : approved.publicationBlocked
+          ? "Publication is blocked because an existing appointment still falls outside the proposed schedule. Keep the appointment, choose another valid resolution, or explicitly cancel it before retrying publication."
+          : "The schedule change was approved. It remains pending until patients resolve every affected appointment.");
+      if (approved.status === "published") {
+        const refreshed = await fetch(`${backendUrl}/api/doctor/schedule`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (refreshed.ok) setSchedule(await refreshed.json());
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not approve the schedule change request.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCancelAffectedAppointment(requestId: string, affectedAppointmentId: string) {
+    if (!window.confirm("No valid alternative is available. Cancel this appointment and process its existing cancellation/refund flow?")) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(
+        `${backendUrl}/api/appointments/schedule-requests/${requestId}/appointments/${affectedAppointmentId}/cancel`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "No valid schedule-change alternative was available; doctor explicitly cancelled the appointment." }),
+        },
+      );
+      const body: unknown = await res.json();
+      if (!res.ok) {
+        const message = typeof body === "object" && body !== null && "message" in body && typeof body.message === "string"
+          ? body.message
+          : "Could not cancel the affected appointment.";
+        throw new Error(message);
+      }
+      const refreshed = await fetch(`${backendUrl}/api/doctor/schedule/requests`, {
+        credentials: "include", cache: "no-store",
+      });
+      if (!refreshed.ok) throw new Error("Appointment was cancelled, but schedule requests could not be refreshed.");
+      setScheduleRequests(await refreshed.json());
+      setNotice("The appointment was cancelled through the existing cancellation and refund flow. You can now approve the request when every affected appointment has a valid resolution.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel the affected appointment.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openProposalEditor(
+    requestId: string,
+    item: ScheduleRequestSummary["affectedAppointments"][number],
+  ) {
+    setProposalEditor({
+      requestId,
+      affectedAppointmentId: item.id,
+      alternativeIds: item.alternatives.map((alternative) => alternative.id),
+    });
+  }
+
+  async function handleSaveProposal() {
+    if (!proposalEditor || proposalEditor.alternativeIds.length === 0) return;
+    setSavingProposal(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(
+        `${backendUrl}/api/doctor/schedule/requests/${proposalEditor.requestId}/appointments/${proposalEditor.affectedAppointmentId}/alternatives`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ alternativeIds: proposalEditor.alternativeIds }),
+        },
+      );
+      if (!res.ok) {
+        const body: unknown = await res.json();
+        const message = typeof body === "object" && body !== null && "message" in body && typeof body.message === "string"
+          ? body.message
+          : "Could not save the rescheduling proposal.";
+        throw new Error(message);
+      }
+      const refreshed = await fetch(`${backendUrl}/api/doctor/schedule/requests`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!refreshed.ok) throw new Error("Proposal saved, but schedule requests could not be refreshed.");
+      setScheduleRequests(await refreshed.json());
+      setProposalEditor(null);
+      setNotice("Rescheduling proposal saved. Approve the schedule request separately to send it to the patient for explicit acceptance.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save the rescheduling proposal.");
+    } finally {
+      setSavingProposal(false);
     }
   }
 
@@ -381,6 +575,177 @@ export function DoctorScheduleManager() {
           {error}
         </div>
       )}
+      {scheduleRequests.length > 0 && (
+        <Card className="border-blue-200 bg-blue-50/60">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Schedule change requests</CardTitle>
+            <CardDescription>Published availability remains unchanged until every affected appointment is resolved.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {scheduleRequests.map((request) => {
+              const affectedList = request.affectedAppointments ?? [];
+              const pending = affectedList.filter((item) => item.consentStatus === "pending").length;
+              const readyToRecheck = request.status === "pending" && request.approvedAt !== null && pending === 0;
+              return (
+                <div key={request.id} className="rounded-xl border border-blue-100 bg-white p-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold capitalize text-slate-900">{request.status} request</span>
+                    <span className="rounded-full bg-blue-50 px-2 py-1 font-semibold capitalize text-blue-800">
+                      {pending ? `${pending} patient response${pending === 1 ? "" : "s"} pending` : readyToRecheck ? "Ready to recheck publication" : "All patients responded"}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-slate-600">Expires {new Date(request.expiresAt).toLocaleString()}</p>
+                  {request.status === "pending" && !request.approvedAt && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="mt-3"
+                      disabled={saving}
+                      onClick={() => void handleApproveRequest(request.id)}
+                    >
+                      Approve request
+                    </Button>
+                  )}
+                  {readyToRecheck && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-3"
+                      disabled={saving}
+                      onClick={() => void handleApproveRequest(request.id)}
+                    >
+                      Recheck publication
+                    </Button>
+                  )}
+                  {request.publicationBlocked && (
+                    <p role="alert" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                      Publication is blocked: an existing booked appointment remains outside the proposed schedule.
+                    </p>
+                  )}
+                  {affectedList.length > 0 && (
+                    <section className="mt-4 border-t border-slate-100 pt-4" aria-label="Affected Appointments">
+                      <h4 className="font-semibold text-slate-900">Affected Appointments</h4>
+                      <p className="mt-1 text-slate-600">
+                        Review the automatically generated alternatives for each affected appointment using Smart Reschedule before approving this request.
+                      </p>
+                      <div className="mt-2 space-y-3">
+                        {affectedList.map((item) => (
+                          <article key={item.id} className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <p className="font-semibold text-slate-900">{item.patient.name}</p>
+                                <p className="mt-1 text-slate-600">
+                                  {new Date(item.originalStartsAt).toLocaleString()}–{new Date(item.originalEndsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                                </p>
+                              </div>
+                              <span className="rounded-full bg-white px-2 py-1 font-semibold text-slate-700">
+                                {item.payment?.statusDisplay ?? "No payment record"}
+                              </span>
+                            </div>
+                            <p className="mt-2 text-slate-700">{item.conflictReason}</p>
+                            <p className="mt-1 text-slate-500">
+                              Patient response: <span className="capitalize">{item.consentStatus}</span> · Resolution: <span className="capitalize">{item.resolutionStatus}</span>
+                            </p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={saving || request.approvedAt !== null || item.alternatives.length === 0}
+                                onClick={() => openProposalEditor(request.id, item)}
+                              >
+                                Smart Reschedule
+                              </Button>
+                              {request.status === "pending" && request.approvedAt === null &&
+                                item.consentStatus === "pending" && item.resolutionStatus === "pending" &&
+                                item.alternatives.length === 0 && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-rose-300 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+                                  disabled={saving}
+                                  onClick={() => void handleCancelAffectedAppointment(request.id, item.id)}
+                                >
+                                  Cancel appointment
+                                </Button>
+                              )}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                  {affectedList.length === 0 && (
+                    <p className="mt-2 text-slate-600">No affected appointments. This schedule change does not conflict with any existing bookings. Approve the request to publish the new schedule immediately.</p>
+                  )}
+                  {affectedList.length > 0 && request.approvedAt && (
+                    <p className="mt-3 text-slate-600">Patient acceptance is required before any appointment is changed.</p>
+                  )}
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      )}
+
+      {proposalEditor && (() => {
+        const request = scheduleRequests.find((item) => item.id === proposalEditor.requestId);
+        const item = request?.affectedAppointments.find((affected) => affected.id === proposalEditor.affectedAppointmentId);
+        if (!request || !item) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="reschedule-proposal-title">
+            <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="reschedule-proposal-title" className="text-lg font-semibold text-slate-950">
+                    Smart Reschedule proposal
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Review and select recommended alternative times for {item.patient.name}. The appointment will not change until the patient accepts.
+                  </p>
+                </div>
+                <button type="button" className="text-sm font-semibold text-slate-500 hover:text-slate-900" onClick={() => setProposalEditor(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="mt-4 space-y-2">
+                {item.alternatives.map((alternative) => {
+                  const checked = proposalEditor.alternativeIds.includes(alternative.id);
+                  return (
+                    <label key={alternative.id} className="flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 p-3 hover:border-teal-400">
+                      <input
+                        type="checkbox"
+                        name="reschedule-alternative"
+                        checked={checked}
+                        onChange={() => setProposalEditor((current) => {
+                          if (!current) return current;
+                          return {
+                            ...current,
+                            alternativeIds: checked
+                              ? current.alternativeIds.filter((id) => id !== alternative.id)
+                              : [...current.alternativeIds, alternative.id],
+                          };
+                        })}
+                      />
+                      <span className="text-sm font-medium text-slate-800">
+                        {new Date(alternative.startsAt).toLocaleString()}–{new Date(alternative.endsAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setProposalEditor(null)}>Cancel</Button>
+                <Button type="button" disabled={savingProposal || proposalEditor.alternativeIds.length === 0} onClick={() => void handleSaveProposal()}>
+                  {savingProposal ? "Saving…" : "Save proposal"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="grid min-w-0 items-start gap-5 sm:gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(19rem,0.75fr)]">
       <div className="min-w-0 space-y-5 sm:space-y-6">
@@ -605,7 +970,7 @@ export function DoctorScheduleManager() {
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 font-bold">
                       <AlertTriangle className="h-4 w-4 text-amber-600" />
-                      Warning: {conflictResult.conflictCount} existing scheduled appointment(s) conflict with this new schedule!
+                      Warning: {conflictResult.conflictCount} existing appointment(s) or active payment hold(s) conflict with this new schedule!
                     </div>
                     <ul className="list-disc list-inside space-y-1 pl-1 text-[11px]">
                       {conflictResult.conflicts.map((c) => (
