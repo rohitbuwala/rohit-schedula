@@ -80,15 +80,36 @@ describe('AppointmentsService with doctor approval/deactivation lifecycle', () =
         status: 'scheduled',
       };
 
-      const txSelect = vi.fn().mockReturnValueOnce({
-        from: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockReturnValueOnce({
-            for: vi.fn().mockReturnValueOnce({
-              limit: vi.fn().mockResolvedValueOnce([existingAppointment]),
+      // Lock order: (1) read doctorId (no lock), (2) lock doctor profile, (3) lock appointment FOR UPDATE
+      const txSelect = vi.fn()
+        // 1. Read doctorId from appointment without lock
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValueOnce({
+            where: vi.fn().mockReturnValueOnce({
+              limit: vi.fn().mockResolvedValueOnce([{ doctorId }]),
             }),
           }),
-        }),
-      });
+        })
+        // 2. Doctor profile lock (lockDoctorCapacity)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValueOnce({
+            where: vi.fn().mockReturnValueOnce({
+              for: vi.fn().mockReturnValueOnce({
+                limit: vi.fn().mockResolvedValueOnce([{}]),
+              }),
+            }),
+          }),
+        })
+        // 3. Appointment row lock (FOR UPDATE)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValueOnce({
+            where: vi.fn().mockReturnValueOnce({
+              for: vi.fn().mockReturnValueOnce({
+                limit: vi.fn().mockResolvedValueOnce([existingAppointment]),
+              }),
+            }),
+          }),
+        });
 
       (db.transaction as any).mockImplementation(async (callback: any) => {
         return callback({ select: txSelect });

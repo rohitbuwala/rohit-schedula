@@ -58,9 +58,11 @@ describe('appointment rescheduling controller & service', () => {
     ],
     participants?: Array<{ id: string; name: string; email: string }>,
   ) {
+    // Lock order: (1) read doctorId from appointment, (2) lock doctor profile, (3) lock appointment FOR UPDATE
     const results = [
-      record ? [record] : [],
-      [{}], // doctor row capacity lock
+      record ? [{ doctorId: record.doctorId ?? doctorId }] : [], // 1. read doctorId (no lock)
+      [{}], // 2. doctor row capacity lock (FOR UPDATE)
+      record ? [record] : [], // 3. appointment row lock (FOR UPDATE)
       [], // weekly capacity falls back to one
       [], // no date override
       [], // no overlapping appointments
