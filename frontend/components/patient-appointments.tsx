@@ -179,6 +179,19 @@ interface Slot {
   endsAt: string;
 }
 
+interface ScheduleChangeRequest {
+  id: string;
+  expiresAt: string;
+  status: "pending" | "published" | "cancelled" | "expired";
+  affectedAppointments: Array<{
+    id: string;
+    consentStatus: "pending" | "accepted" | "declined" | "expired";
+    resolutionStatus: "pending" | "rescheduled" | "cancelled" | "expired";
+    appointment: { id: string; startsAt: string; endsAt: string; status: PatientAppointment["status"] };
+    alternatives: Array<{ id: string; startsAt: string; endsAt: string; rank: number }>;
+  }>;
+}
+
 export function PatientAppointments({
   refreshKey = 0,
   onCancelled,
@@ -219,6 +232,17 @@ export function PatientAppointments({
 
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
+  const [scheduleRequests, setScheduleRequests] = useState<ScheduleChangeRequest[]>([]);
+  const [scheduleRequestsLoading, setScheduleRequestsLoading] = useState(true);
+  const [scheduleRequestsError, setScheduleRequestsError] = useState("");
+  const [scheduleResponseErrors, setScheduleResponseErrors] = useState<Record<string, string>>({});
+  const [respondingTo, setRespondingTo] = useState<string | null>(null);
+  const [scheduleClock, setScheduleClock] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setScheduleClock(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -259,6 +283,72 @@ export function PatientAppointments({
     };
   }, [refreshKey, refreshTrigger]);
 
+  useEffect(() => {
+    let active = true;
+    async function loadScheduleRequests() {
+      setScheduleRequestsLoading(true);
+      setScheduleRequestsError("");
+      try {
+        const response = await fetch(`${backendUrl}/api/appointments/schedule-requests`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (response.status === 401) throw new Error("Your session expired. Log in again.");
+        if (response.status === 403) throw new Error("Schedule change history is available to patient accounts only.");
+        if (!response.ok) throw new Error("Could not load schedule change requests. Please try again.");
+        const history: Array<{
+          request: Omit<ScheduleChangeRequest, "affectedAppointments">;
+          affectedAppointments: ScheduleChangeRequest["affectedAppointments"];
+        }> = await response.json();
+        if (active) {
+          setScheduleRequests(history.map(({ request, affectedAppointments }) => ({ ...request, affectedAppointments })));
+          setScheduleRequestsError("");
+        }
+      } catch (err) {
+        if (active) setScheduleRequestsError(err instanceof Error ? err.message : "Could not load schedule change requests.");
+      } finally {
+        if (active) setScheduleRequestsLoading(false);
+      }
+    }
+    void loadScheduleRequests();
+    return () => { active = false; };
+  }, [refreshKey, refreshTrigger]);
+
+  async function respondToScheduleChange(
+    request: ScheduleChangeRequest,
+    affected: ScheduleChangeRequest["affectedAppointments"][number],
+    alternativeId?: string,
+  ) {
+    setRespondingTo(affected.id);
+    setScheduleResponseErrors((current) => ({ ...current, [affected.id]: "" }));
+    setActionError("");
+    setActionNotice("");
+    try {
+      const base = `${backendUrl}/api/appointments/schedule-requests/${request.id}/appointments/${affected.id}`;
+      const response = await fetch(`${base}/${alternativeId ? "accept" : "decline"}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(alternativeId ? { alternativeId } : {}),
+      });
+      if (response.status === 401) throw new Error("Your session expired. Log in again.");
+      if (response.status === 403) throw new Error("You are not authorized to respond to this appointment.");
+      if (response.status === 409) throw new Error("This request expired or changed. Refresh to see its current status.");
+      if (!response.ok) throw new Error("We could not confirm your response. Refresh to check the appointment status.");
+      setActionNotice(alternativeId
+        ? "Your appointment was moved with your consent."
+        : "Your decline was recorded; your appointment remains unchanged.");
+      handleManualRefresh();
+    } catch (err) {
+      setScheduleResponseErrors((current) => ({
+        ...current,
+        [affected.id]: err instanceof Error ? err.message : "Could not record your response.",
+      }));
+    } finally {
+      setRespondingTo(null);
+    }
+  }
+
   // Load slots when rescheduling dialog is open and date changes
   useEffect(() => {
     if (!reschedulingId || !rescheduleDoctorProfileId || !rescheduleDate) {
@@ -296,6 +386,7 @@ export function PatientAppointments({
 
   function handleManualRefresh() {
     setLoading(true);
+    setScheduleRequestsLoading(true);
     setRefreshTrigger((prev) => prev + 1);
   }
 
@@ -570,6 +661,117 @@ export function PatientAppointments({
           {actionError}
         </div>
       )}
+
+      {scheduleRequestsLoading && (
+        <p role="status" className="rounded-xl border border-blue-100 bg-white p-4 text-xs text-slate-600">
+          <Loader2 className="mr-2 inline h-3.5 w-3.5 animate-spin" />Loading schedule change requests…
+        </p>
+      )}
+
+      {scheduleRequestsError && (
+        <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-700">
+          <p>{scheduleRequestsError}</p>
+          <Button type="button" variant="outline" size="sm" className="mt-3" onClick={handleManualRefresh}>
+            Try again
+          </Button>
+        </div>
+      )}
+
+      {!scheduleRequestsLoading && !scheduleRequestsError && scheduleRequests.length === 0 && (
+        <p className="rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-500">
+          No schedule change requests to review.
+        </p>
+      )}
+
+      {scheduleRequests.map((request) => {
+        const requestExpired = request.status === "expired" || (
+          request.status === "pending" &&
+          new Date(request.expiresAt).getTime() <= scheduleClock &&
+          request.affectedAppointments.some((affected) => affected.consentStatus === "pending")
+        );
+        return (
+          <div key={request.id} className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Doctor schedule change</h3>
+                <p className="text-xs text-slate-600">
+                  {requestExpired
+                    ? "This response period has expired. Your appointment was not moved without your consent."
+                    : request.status === "pending"
+                      ? `Respond by ${formatDate(request.expiresAt)} ${new Date(request.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                      : `Request ${request.status}`}
+                </p>
+              </div>
+              <span className={`rounded-full px-2.5 py-1 text-xs font-semibold capitalize border ${requestExpired ? "bg-slate-100 text-slate-700 border-slate-200" : "bg-white text-blue-800 border-blue-200"}`}>
+                {requestExpired ? "expired" : request.status}
+              </span>
+            </div>
+            {request.affectedAppointments.map((affected) => {
+              const expired = requestExpired || affected.consentStatus === "expired";
+              const consentStatus = expired && affected.consentStatus === "pending" ? "expired" : affected.consentStatus;
+              const canRespond = request.status === "pending" && !expired && affected.consentStatus === "pending";
+              return (
+                <div key={affected.id} className="rounded-xl border border-blue-100 bg-white p-3">
+                  <p className="text-xs font-semibold text-slate-800">
+                    Appointment {affected.appointment.id.slice(-8)} · {affected.appointment.status.replace("_", " ")}
+                  </p>
+                  <p className="mt-1 text-xs font-semibold text-slate-800">
+                    Current time: {formatDate(affected.appointment.startsAt)} · {formatTime(affected.appointment.startsAt, affected.appointment.endsAt)}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-600 capitalize">
+                    Patient response: {consentStatus} · Appointment outcome: {affected.resolutionStatus}
+                  </p>
+                  {canRespond && (
+                    <>
+                      <p className="mt-3 text-xs text-slate-600">
+                        Choose a proposed time or decline. Your appointment stays at its current time unless you accept.
+                      </p>
+                      {affected.alternatives.length > 0 ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {affected.alternatives.map((alternative) => (
+                            <Button
+                              key={alternative.id}
+                              type="button"
+                              size="sm"
+                              disabled={respondingTo === affected.id}
+                              onClick={() => void respondToScheduleChange(request, affected, alternative.id)}
+                            >
+                              Accept {formatDate(alternative.startsAt)} · {formatTime(alternative.startsAt, alternative.endsAt)}
+                            </Button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="mt-2 rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                          No alternative times are available. Your appointment has not been changed. You may decline this proposal or contact your doctor.
+                        </p>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-2"
+                        disabled={respondingTo === affected.id}
+                        onClick={() => void respondToScheduleChange(request, affected)}
+                      >
+                        {respondingTo === affected.id ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                        Decline proposal
+                      </Button>
+                    </>
+                  )}
+                  {scheduleResponseErrors[affected.id] && (
+                    <p role="alert" className="mt-2 rounded-lg bg-red-50 p-3 text-xs text-red-700">
+                      Response failed: {scheduleResponseErrors[affected.id]}
+                    </p>
+                  )}
+                  {respondingTo === affected.id && (
+                    <p role="status" className="mt-2 text-xs text-slate-500">Recording your response…</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
 
       {loading && (
         <p role="status" className="rounded-2xl border border-slate-200 bg-white p-6 text-xs text-slate-500 text-center">
