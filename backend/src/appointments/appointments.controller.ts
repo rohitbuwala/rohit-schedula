@@ -40,6 +40,92 @@ export class AppointmentsController {
     return this.appointments.listMine(user);
   }
 
+  @Get('schedule-requests')
+  @Roles('patient')
+  listScheduleChangeRequests(@CurrentUser() patient: AuthenticatedUser) {
+    return this.appointments.listScheduleChangeRequestsForPatient(patient.id);
+  }
+
+  @Get('schedule-requests/:requestId')
+  @Roles('patient')
+  getScheduleChangeRequest(
+    @Param('requestId') requestId: string,
+    @CurrentUser() patient: AuthenticatedUser,
+  ) {
+    const parsed = idSchema.safeParse(requestId);
+    if (!parsed.success) throw new BadRequestException('Invalid schedule request id.');
+    return this.appointments.getScheduleChangeRequestForPatient(parsed.data, patient.id);
+  }
+
+  @Post('schedule-requests/:requestId/appointments/:affectedAppointmentId/accept')
+  @Roles('patient')
+  acceptScheduleChange(
+    @Param('requestId') requestId: string,
+    @Param('affectedAppointmentId') affectedAppointmentId: string,
+    @CurrentUser() patient: AuthenticatedUser,
+    @Body() body: unknown,
+  ) {
+    const parsedRequestId = idSchema.safeParse(requestId);
+    const parsedAffectedId = idSchema.safeParse(affectedAppointmentId);
+    if (!parsedRequestId.success || !parsedAffectedId.success) {
+      throw new BadRequestException('Invalid schedule change identifier.');
+    }
+    const parsedBody = z.object({ alternativeId: idSchema }).strict().safeParse(body);
+    if (!parsedBody.success) throw new BadRequestException(parsedBody.error.flatten());
+    return this.appointments.acceptScheduleChange(
+      parsedRequestId.data,
+      parsedAffectedId.data,
+      parsedBody.data.alternativeId,
+      patient.id,
+    );
+  }
+
+  @Post('schedule-requests/:requestId/appointments/:affectedAppointmentId/decline')
+  @Roles('patient')
+  declineScheduleChange(
+    @Param('requestId') requestId: string,
+    @Param('affectedAppointmentId') affectedAppointmentId: string,
+    @CurrentUser() patient: AuthenticatedUser,
+    @Body() body: unknown,
+  ) {
+    const parsedRequestId = idSchema.safeParse(requestId);
+    const parsedAffectedId = idSchema.safeParse(affectedAppointmentId);
+    if (!parsedRequestId.success || !parsedAffectedId.success) {
+      throw new BadRequestException('Invalid schedule change identifier.');
+    }
+
+    const parsedBody = z.object({ reason: z.string().trim().max(500).optional() }).strict().safeParse(body ?? {});
+    if (!parsedBody.success) throw new BadRequestException(parsedBody.error.flatten());
+    return this.appointments.declineScheduleChange(
+      parsedRequestId.data,
+      parsedAffectedId.data,
+      patient.id,
+      parsedBody.data.reason,
+    );
+  }
+
+  @Post('schedule-requests/:requestId/appointments/:affectedAppointmentId/cancel')
+  @Roles('doctor')
+  cancelUnresolvedScheduleChange(
+    @Param('requestId') requestId: string,
+    @Param('affectedAppointmentId') affectedAppointmentId: string,
+    @CurrentUser() doctor: AuthenticatedUser,
+    @Body() body: unknown,
+  ) {
+    const parsedRequestId = idSchema.safeParse(requestId);
+    const parsedAffectedId = idSchema.safeParse(affectedAppointmentId);
+    const parsedBody = z.object({ reason: z.string().trim().min(1).max(500) }).strict().safeParse(body);
+    if (!parsedRequestId.success || !parsedAffectedId.success || !parsedBody.success) {
+      throw new BadRequestException('A valid cancellation reason is required.');
+    }
+    return this.appointments.cancelUnresolvedScheduleChange(
+      parsedRequestId.data,
+      parsedAffectedId.data,
+      doctor.id,
+      parsedBody.data.reason,
+    );
+  }
+
   @Get(':id/patient')
   @Roles('doctor')
   @UseGuards(DoctorApprovedGuard)
