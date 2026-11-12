@@ -2,7 +2,13 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { and, eq, lte } from 'drizzle-orm';
 import { db } from '../db/database.js';
-import { appointment, payment } from '../db/schema.js';
+import {
+  appointment,
+  doctorProfile,
+  payment,
+  scheduleChangeAppointment,
+  scheduleChangeRequest,
+} from '../db/schema.js';
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 
@@ -16,8 +22,9 @@ export class AppointmentExpiryService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Run an initial sweep on server startup to handle holds that expired during downtime
+    // Run initial sweeps on startup to handle work that expired during downtime.
     await this.cleanupExpiredHolds();
+    await this.cleanupExpiredScheduleChangeRequests();
   }
 
   /**
@@ -27,9 +34,15 @@ export class AppointmentExpiryService implements OnModuleInit {
   @Interval(30_000)
   async handleCron() {
     try {
-      const cleaned = await this.cleanupExpiredHolds();
-      if (cleaned > 0) {
-        this.logger.log(`Released ${cleaned} expired appointment hold(s).`);
+      const [cleanedHolds, expiredRequests] = await Promise.all([
+        this.cleanupExpiredHolds(),
+        this.cleanupExpiredScheduleChangeRequests(),
+      ]);
+      if (cleanedHolds > 0) {
+        this.logger.log(`Released ${cleanedHolds} expired appointment hold(s).`);
+      }
+      if (expiredRequests > 0) {
+        this.logger.log(`Expired ${expiredRequests} schedule change request(s).`);
       }
     } catch (err) {
       this.logger.error('Error during scheduled hold cleanup:', err);
@@ -140,6 +153,69 @@ export class AppointmentExpiryService implements OnModuleInit {
       }
 
       return cancelledCount;
+    });
+  }
+
+  /**
+   * Marks expired schedule-change requests terminal without changing any
+   * appointment, payment, or reminder. The doctor profile lock is acquired
+   * before the request lock, matching approval and patient-consent flows.
+   */
+  async cleanupExpiredScheduleChangeRequests(now = new Date()): Promise<number> {
+    return db.transaction(async (tx) => {
+      const candidates = await tx.select({
+        id: scheduleChangeRequest.id,
+        doctorId: scheduleChangeRequest.doctorId,
+      }).from(scheduleChangeRequest)
+        .where(and(
+          eq(scheduleChangeRequest.status, 'pending'),
+          lte(scheduleChangeRequest.expiresAt, now),
+        ));
+
+      let expiredCount = 0;
+      for (const candidate of candidates) {
+        await tx.select({ id: doctorProfile.id }).from(doctorProfile)
+          .where(eq(doctorProfile.userId, candidate.doctorId)).for('update').limit(1);
+        const [request] = await tx.select({ id: scheduleChangeRequest.id })
+          .from(scheduleChangeRequest)
+          .where(and(
+            eq(scheduleChangeRequest.id, candidate.id),
+            eq(scheduleChangeRequest.status, 'pending'),
+            lte(scheduleChangeRequest.expiresAt, now),
+          ))
+          .for('update')
+          .limit(1);
+        if (!request) continue;
+
+        await tx.select({ id: scheduleChangeAppointment.id })
+          .from(scheduleChangeAppointment)
+          .where(eq(scheduleChangeAppointment.requestId, request.id))
+          .for('update');
+        const [expired] = await tx.update(scheduleChangeRequest)
+          .set({ status: 'expired', expiredAt: now, updatedAt: now })
+          .where(and(
+            eq(scheduleChangeRequest.id, request.id),
+            eq(scheduleChangeRequest.status, 'pending'),
+          ))
+          .returning({ id: scheduleChangeRequest.id });
+        if (!expired) continue;
+
+        await tx.update(scheduleChangeAppointment)
+          .set({
+            consentStatus: 'expired',
+            resolutionStatus: 'expired',
+            responseReason: 'Schedule change request expired before patient response.',
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(scheduleChangeAppointment.requestId, request.id),
+            eq(scheduleChangeAppointment.consentStatus, 'pending'),
+            eq(scheduleChangeAppointment.resolutionStatus, 'pending'),
+          ));
+        expiredCount++;
+      }
+      return expiredCount;
     });
   }
 }

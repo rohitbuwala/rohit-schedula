@@ -19,6 +19,37 @@ vi.mock('../db/database.js', () => ({
   },
 }));
 
+function mockTransactionWithSelectResults(results: unknown[]) {
+  const builders: Array<{ for: ReturnType<typeof vi.fn> }> = [];
+  const tx = {
+    select: vi.fn(() => {
+      const result = results.shift() ?? [];
+      const builder: any = {};
+      for (const method of ['from', 'where', 'limit']) builder[method] = vi.fn(() => builder);
+      builder.for = vi.fn(() => builder);
+      builder.then = (resolve: (value: unknown) => unknown) => Promise.resolve(result).then(resolve);
+      builders.push(builder);
+      return builder;
+    }),
+    update: vi.fn(),
+  };
+  return { tx, builders };
+}
+
+function updateReturning(result: unknown[]) {
+  return {
+    set: vi.fn().mockReturnValue({
+      where: vi.fn().mockReturnValue({
+        returning: vi.fn().mockResolvedValue(result),
+      }),
+    }),
+  };
+}
+
+function updateCompleting() {
+  return { set: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue([]) }) };
+}
+
 describe('PaymentsService', () => {
   let service: PaymentsService;
   let mockRazorpay: RazorpayInstance;
@@ -444,68 +475,21 @@ describe('PaymentsService', () => {
       expect(reminderScheduler.scheduleForAppointment).toHaveBeenCalledWith(mockTx, expect.objectContaining({ reminderGeneration: 0 }), 'America/New_York');
     });
 
-    it('safely handles late capture when slot was reassigned and queues a refund', async () => {
+    it('refunds late capture only when capacity is full and takes the shared doctor capacity lock', async () => {
       const validSignature = createHmac('sha256', sampleSecret)
         .update(`${razorpayOrderId}|${razorpayPaymentId}`)
         .digest('hex');
 
-      const mockTx = {
-        select: vi
-          .fn()
-          // 1. payment select: status was failed due to expiry
-          .mockReturnValueOnce({
-            from: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([
-                    {
-                      id: 'pay-1',
-                      appointmentId,
-                      patientId,
-                      doctorId: 'doctor-1',
-                      razorpayOrderId,
-                      amountPaise: 50000,
-                      currency: 'INR',
-                      status: 'failed',
-                      failureReason: 'Hold expired before payment completion',
-                    },
-                  ]),
-                }),
-              }),
-            }),
-          })
-          // 2. appointment select: appointment was cancelled
-          .mockReturnValueOnce({
-            from: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([
-                    {
-                      id: appointmentId,
-                      doctorId: 'doctor-1',
-                      startsAt: new Date('2026-11-05T10:00:00Z'),
-                      endsAt: new Date('2026-11-05T10:30:00Z'),
-                      status: 'cancelled',
-                    },
-                  ]),
-                }),
-              }),
-            }),
-          })
-          // 3. conflict check: another patient booked the slot!
-          .mockReturnValueOnce({
-            from: vi.fn().mockReturnValueOnce({
-              where: vi.fn().mockReturnValueOnce({
-                limit: vi.fn().mockResolvedValueOnce([{ id: 'other-appt' }]),
-              }),
-            }),
-          }),
-        update: vi.fn().mockReturnValueOnce({
-          set: vi.fn().mockReturnValueOnce({
-            where: vi.fn().mockResolvedValueOnce([]),
-          }),
-        }),
-      };
+      const { tx: mockTx, builders } = mockTransactionWithSelectResults([
+        [{ id: 'pay-1', appointmentId, patientId, doctorId: 'doctor-1', razorpayOrderId,
+          amountPaise: 50000, currency: 'INR', status: 'failed', failureReason: 'Hold expired before payment completion' }],
+        [{ id: appointmentId, doctorId: 'doctor-1', startsAt: new Date('2026-11-05T10:00:00Z'), endsAt: new Date('2026-11-05T10:30:00Z'), status: 'cancelled' }],
+        [{}], // shared doctor capacity lock
+        [{ capacity: 1 }], // weekly capacity
+        [], // no date override
+        [{ id: 'other-appt' }], // the only capacity place is occupied
+      ]);
+      mockTx.update.mockReturnValueOnce(updateCompleting());
 
       (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
 
@@ -521,6 +505,38 @@ describe('PaymentsService', () => {
       expect(result.status).toBe('captured');
       expect(result.message).toContain('refund has been queued');
       expect(mockNotifications.createNotification).toHaveBeenCalled();
+      expect(builders[2]?.for).toHaveBeenCalledWith('update');
+    });
+
+    it('accepts a late capture when a multi-capacity slot still has room', async () => {
+      const validSignature = createHmac('sha256', sampleSecret)
+        .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+        .digest('hex');
+      const scheduledAppointment = {
+        id: appointmentId, patientId, doctorId: 'doctor-1', startsAt: new Date('2026-11-05T10:00:00Z'),
+        endsAt: new Date('2026-11-05T10:30:00Z'), status: 'scheduled', updatedAt: new Date(), reminderGeneration: 0,
+      };
+      const { tx } = mockTransactionWithSelectResults([
+        [{ id: 'pay-1', appointmentId, patientId, doctorId: 'doctor-1', razorpayOrderId,
+          amountPaise: 50000, currency: 'INR', status: 'failed', failureReason: 'Hold expired before payment completion' }],
+        [{ id: appointmentId, doctorId: 'doctor-1', startsAt: scheduledAppointment.startsAt, endsAt: scheduledAppointment.endsAt, status: 'cancelled' }],
+        [{}],
+        [{ capacity: 3 }], // wave/stream slot capacity
+        [],
+        [{ id: 'one-active-booking' }], // one booking leaves two places available
+      ]);
+      tx.update
+        .mockReturnValueOnce(updateCompleting())
+        .mockReturnValueOnce(updateReturning([scheduledAppointment]));
+      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(tx));
+
+      const result = await service.verifyPayment(patientId, {
+        appointmentId, razorpayOrderId, razorpayPaymentId, razorpaySignature: validSignature,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.lateCapture).toBeUndefined();
+      expect(tx.update).toHaveBeenCalledTimes(2);
     });
   });
 

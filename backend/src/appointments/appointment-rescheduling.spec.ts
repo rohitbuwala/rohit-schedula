@@ -22,8 +22,25 @@ describe('appointment rescheduling controller & service', () => {
   const doctorId = 'doctor-456';
   const otherPatientId = 'patient-999';
 
-  const validNewStartsAt = new Date(Date.now() + 86400000); // 1 day in future
+  const validNewStartsAt = (() => {
+    const date = new Date();
+    const daysUntilMonday = ((8 - date.getUTCDay()) % 7) || 7;
+    date.setUTCDate(date.getUTCDate() + daysUntilMonday);
+    date.setUTCHours(10, 0, 0, 0);
+    return date;
+  })();
   const validNewEndsAt = new Date(validNewStartsAt.getTime() + 30 * 60 * 1000);
+  const availableSchedule = {
+    timezone: 'UTC', activeDays: [0, 1, 2, 3, 4, 5, 6], startHour: 0, endHour: 24,
+    slotDurationMinutes: 30, breakStart: null, breakEnd: null, leaveDates: [], dateOverrides: [],
+  };
+
+  function scheduleServiceWith(config: Record<string, unknown>) {
+    return {
+      getScheduleConfigForDoctor: vi.fn().mockResolvedValue(config),
+      getTimezoneForDoctor: vi.fn().mockResolvedValue(config.timezone ?? 'UTC'),
+    };
+  }
 
   function mockTransactionWith(
     record: Record<string, unknown> | null,
@@ -41,22 +58,27 @@ describe('appointment rescheduling controller & service', () => {
     ],
     participants?: Array<{ id: string; name: string; email: string }>,
   ) {
-    const select = vi.fn().mockReturnValueOnce({
-      from: vi.fn().mockReturnValueOnce({
-        where: vi.fn().mockReturnValueOnce({
-          for: vi.fn().mockReturnValueOnce({
-            limit: vi.fn().mockResolvedValue(record ? [record] : []),
-          }),
-        }),
-      }),
+    // Lock order: (1) read doctorId from appointment, (2) lock doctor profile, (3) lock appointment FOR UPDATE
+    const results = [
+      record ? [{ doctorId: record.doctorId ?? doctorId }] : [], // 1. read doctorId (no lock)
+      [{}], // 2. doctor row capacity lock (FOR UPDATE)
+      record ? [record] : [], // 3. appointment row lock (FOR UPDATE)
+      [], // weekly capacity falls back to one
+      [], // no date override
+      [], // no overlapping appointments
+      ...(participants ? [participants] : []),
+    ];
+    const select = vi.fn(() => {
+      const result = results.shift() ?? [];
+      const builder: any = {
+        from: vi.fn(() => builder),
+        where: vi.fn(() => builder),
+        for: vi.fn(() => builder),
+        limit: vi.fn(() => builder),
+        then: (resolve: (value: unknown) => unknown) => Promise.resolve(result).then(resolve),
+      };
+      return builder;
     });
-    if (participants) {
-      select.mockReturnValueOnce({
-        from: vi.fn().mockReturnValueOnce({
-          where: vi.fn().mockResolvedValueOnce(participants),
-        }),
-      });
-    }
     const tx = {
       select,
       update: vi.fn().mockReturnValue({
@@ -164,10 +186,37 @@ describe('appointment rescheduling controller & service', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
+  it.each([
+    ['leave dates', { ...availableSchedule, leaveDates: [validNewStartsAt.toISOString().slice(0, 10)] }, validNewStartsAt],
+    ['breaks', { ...availableSchedule, activeDays: [1], breakStart: '09:30', breakEnd: '10:30' }, validNewStartsAt],
+    ['inactive weekdays', { ...availableSchedule, activeDays: [2] }, validNewStartsAt],
+    ['override duration', {
+      ...availableSchedule,
+      dateOverrides: [{ date: validNewStartsAt.toISOString().slice(0, 10), startHour: 9, endHour: 12, slotDurationMinutes: 15, breakStart: null, breakEnd: null }],
+    }, validNewStartsAt],
+  ])('rejects rescheduling onto %s', async (_caseName, config, startsAt) => {
+    mockTransactionWith({
+      id: appointmentId, patientId, doctorId,
+      startsAt: new Date(Date.now() + 3600000), endsAt: new Date(Date.now() + 5400000), status: 'scheduled',
+    });
+    const service = new AppointmentsService(
+      { isApproved: vi.fn().mockResolvedValue(true) } as never,
+      scheduleServiceWith(config as Record<string, unknown>) as never,
+    );
+
+    await expect(service.reschedule(appointmentId, { id: patientId, role: 'patient' } as AuthenticatedUser, {
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 30 * 60 * 1000),
+    })).rejects.toThrow(BadRequestException);
+  });
+
   it('successfully updates appointment atomically and creates notifications', async () => {
     const emailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
     const reminders = { cancelForAppointment: vi.fn(), scheduleForAppointment: vi.fn() };
-    const scheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
+    const scheduleService = {
+      ...scheduleServiceWith({ ...availableSchedule, timezone: 'America/New_York' }),
+      getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York'),
+    };
     const tx = mockTransactionWith({
       id: appointmentId,
       patientId,

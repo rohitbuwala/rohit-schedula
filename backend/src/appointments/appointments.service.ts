@@ -1,8 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, lt, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
-import { appointment, doctorProfile, payment, refund, user } from '../db/schema.js';
+import { appointment, appointmentHistory, doctorAvailability, doctorProfile, doctorScheduleOverride, payment, refund, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, user } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -12,13 +12,16 @@ import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import type { EmailEventType } from '../notifications/email-templates.js';
 import { canAccessAppointment } from './appointment-access.js';
-import { createWithConflictHandling } from './appointment-conflict.js';
-import { createZonedDate, getAvailableSlots, isBookableSlot } from './appointment-availability.js';
+import { createWithConflictHandling, reserveWithinCapacity } from './appointment-conflict.js';
+import { createZonedDate, getAvailableSlotsWithCapacity, getBookableRescheduleWindow, getDurationForDate, isBookableSlot } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
 import type { AppointmentRescheduleInput } from './appointment-reschedule.schema.js';
+import { doctorScheduleUpdateSchema } from '../doctors/doctor-schedule.schema.js';
 import { randomUUID } from 'node:crypto';
+
+type AppointmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 interface PatientAppointmentRow {
   id: string;
@@ -170,6 +173,24 @@ export class AppointmentsService {
     }
   }
 
+  private async lockDoctorCapacity(tx: AppointmentTransaction, doctorId: string): Promise<void> {
+    // A database row lock serializes capacity checks and inserts for this doctor
+    // across all application instances.
+    await tx.select({ id: doctorProfile.id }).from(doctorProfile)
+      .where(eq(doctorProfile.userId, doctorId)).for('update').limit(1);
+  }
+
+  private async getCapacityForDate(tx: AppointmentTransaction, doctorId: string, date: string): Promise<number> {
+    const [weekly] = await tx.select({ capacity: doctorAvailability.capacity }).from(doctorAvailability)
+      .where(eq(doctorAvailability.doctorId, doctorId)).limit(1);
+    const [override] = await tx.select({ capacity: doctorScheduleOverride.capacity }).from(doctorScheduleOverride)
+      .where(and(
+        eq(doctorScheduleOverride.doctorId, doctorId),
+        eq(doctorScheduleOverride.date, date),
+      )).limit(1);
+    return override?.capacity ?? weekly?.capacity ?? 1;
+  }
+
   async getAvailableSlots(patientId: string, input: AppointmentAvailabilityQuery) {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
     if (!doctor) throw new NotFoundException('Approved doctor not found.');
@@ -181,7 +202,10 @@ export class AppointmentsService {
 
     const tz = scheduleConfig.timezone ?? 'Asia/Kolkata';
     const dayStart = createZonedDate(input.date, 0, 0, tz);
-    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+    const nextDate = new Date(`${input.date}T12:00:00.000Z`);
+    nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+    const nextDateString = nextDate.toISOString().slice(0, 10);
+    const dayEnd = createZonedDate(nextDateString, 0, 0, tz);
     const now = new Date();
 
     const busy = await db.select({
@@ -204,17 +228,32 @@ export class AppointmentsService {
         ),
       ));
 
-    const slots = getAvailableSlots(input.date, busy, now, {
+    const slots = getAvailableSlotsWithCapacity(input.date, busy, now, {
       ...scheduleConfig,
       timezone: tz,
     });
+
+    const override = scheduleConfig.dateOverrides?.find((entry) => entry.date === input.date);
+    const mode = override?.schedulingMode ?? scheduleConfig.schedulingMode ?? 'stream';
+    const capacity = override?.capacity ?? scheduleConfig.capacity ?? 1;
+    const durationMinutes = getDurationForDate(input.date, scheduleConfig);
 
     return {
       doctorProfileId: input.doctorProfileId,
       date: input.date,
       timezone: tz,
-      durationMinutes: scheduleConfig.slotDurationMinutes ?? 30,
-      slots: slots.map(({ startsAt, endsAt }) => ({ startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() })),
+      durationMinutes,
+      mode,
+      capacity,
+      slots: slots.map(({ startsAt, endsAt, mode: slotMode, slotId, sessionId, capacity: slotCapacity, remainingCapacity }) => ({
+        startsAt: startsAt.toISOString(),
+        endsAt: endsAt.toISOString(),
+        mode: slotMode,
+        slotId: `${doctor.userId}:${slotId}`,
+        sessionId: sessionId ? `${doctor.userId}:${sessionId}` : null,
+        capacity: slotCapacity,
+        remainingCapacity,
+      })),
     };
   }
 
@@ -232,62 +271,62 @@ export class AppointmentsService {
       throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
     }
 
-    const now = new Date();
-
-    // 1. Check for overlapping scheduled or active held appointments
-    const busy = await db.select({ id: appointment.id })
-      .from(appointment)
-      .where(and(
-        eq(appointment.doctorId, doctor.userId),
-        or(
-          eq(appointment.status, 'scheduled'),
-          and(
-            eq(appointment.status, 'pending_payment'),
-            gt(appointment.holdExpiresAt, now),
-          ),
-        ),
-        lt(appointment.startsAt, input.endsAt),
-        gt(appointment.endsAt, input.startsAt),
-      ))
-      .limit(1);
-
-    if (busy.length > 0) {
-      throw new ConflictException('The selected doctor already has a scheduled appointment in that time slot.');
-    }
-
-    // 2. Clean up any expired pending_payment hold in this slot before inserting new hold
-    await db.update(appointment)
-      .set({ status: 'cancelled', updatedAt: new Date() })
-      .where(and(
-        eq(appointment.doctorId, doctor.userId),
-        eq(appointment.status, 'pending_payment'),
-        lte(appointment.holdExpiresAt, now),
-        lt(appointment.startsAt, input.endsAt),
-        gt(appointment.endsAt, input.startsAt),
-      ));
-
-    // 3. Create atomic 10-minute hold with database exclusion constraint protection
-    const holdExpiresAt = new Date(now.getTime() + 10 * 60 * 1000);
-
-    return createWithConflictHandling(async () => {
-      const [created] = await db.insert(appointment).values({
-        id: randomUUID(),
-        patientId,
-        doctorId: doctor.userId,
-        startsAt: input.startsAt,
-        endsAt: input.endsAt,
-        status: 'pending_payment',
-        holdExpiresAt,
-      }).returning({
-        id: appointment.id,
-        startsAt: appointment.startsAt,
-        endsAt: appointment.endsAt,
-        status: appointment.status,
-        holdExpiresAt: appointment.holdExpiresAt,
-      });
-
-      return created;
-    });
+    return createWithConflictHandling(() => db.transaction(async (tx) => {
+      return reserveWithinCapacity(
+        () => this.lockDoctorCapacity(tx, doctor.userId),
+        async () => {
+          const currentConfig = this.scheduleService
+            ? await this.scheduleService.getScheduleConfigForProfile(input.doctorProfileId)
+            : scheduleConfig;
+          const currentTimezone = currentConfig.timezone ?? 'Asia/Kolkata';
+          if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), {
+            ...currentConfig,
+            timezone: currentTimezone,
+          })) {
+            throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
+          }
+          const date = new Intl.DateTimeFormat('en-CA', { timeZone: currentTimezone }).format(input.startsAt);
+          return this.getCapacityForDate(tx, doctor.userId, date);
+        },
+        async () => {
+          const now = new Date();
+          await tx.update(appointment)
+            .set({ status: 'cancelled', updatedAt: now })
+            .where(and(
+              eq(appointment.doctorId, doctor.userId),
+              eq(appointment.status, 'pending_payment'),
+              lte(appointment.holdExpiresAt, now),
+              lt(appointment.startsAt, input.endsAt),
+              gt(appointment.endsAt, input.startsAt),
+            ));
+          const occupied = await tx.select({ id: appointment.id }).from(appointment).where(and(
+            eq(appointment.doctorId, doctor.userId),
+            or(
+              eq(appointment.status, 'scheduled'),
+              and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now)),
+            ),
+            lt(appointment.startsAt, input.endsAt),
+            gt(appointment.endsAt, input.startsAt),
+          ));
+          return occupied.length;
+        },
+        async () => {
+          const now = new Date();
+          const [created] = await tx.insert(appointment).values({
+            id: randomUUID(), patientId, doctorId: doctor.userId,
+            startsAt: input.startsAt, endsAt: input.endsAt,
+            status: 'pending_payment', holdExpiresAt: new Date(now.getTime() + 10 * 60 * 1000),
+          }).returning({
+            id: appointment.id,
+            startsAt: appointment.startsAt,
+            endsAt: appointment.endsAt,
+            status: appointment.status,
+            holdExpiresAt: appointment.holdExpiresAt,
+          });
+          return created;
+        },
+      );
+    }));
   }
 
   async listMine(actor: AuthenticatedUser) {
@@ -765,6 +804,17 @@ export class AppointmentsService {
     }
 
     return db.transaction(async (tx) => {
+      // Read the doctor id without locking the appointment, then acquire the
+      // shared doctor-capacity lock before the appointment row. Schedule-change
+      // consent follows the same order, preventing a doctor-lock/appointment-lock
+      // cycle between the two rescheduling paths.
+      const [candidate] = await tx.select({ doctorId: appointment.doctorId })
+        .from(appointment)
+        .where(eq(appointment.id, id))
+        .limit(1);
+      if (!candidate) throw new NotFoundException('Appointment not found.');
+      await this.lockDoctorCapacity(tx, candidate.doctorId);
+
       const [record] = await tx.select().from(appointment)
         .where(eq(appointment.id, id))
         .for('update')
@@ -798,6 +848,30 @@ export class AppointmentsService {
         durationMs !== 30 * 60 * 1000
       ) {
         throw new BadRequestException('Appointment duration must be 15 or 30 minutes.');
+      }
+
+      const scheduleConfig = this.scheduleService
+        ? await this.scheduleService.getScheduleConfigForDoctor(record.doctorId)
+        : { timezone: 'Asia/Kolkata', slotDurationMinutes: 30 };
+      const timezone = scheduleConfig.timezone ?? 'Asia/Kolkata';
+      if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), { ...scheduleConfig, timezone })) {
+        throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
+      }
+      const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(input.startsAt);
+      const capacity = await this.getCapacityForDate(tx, record.doctorId, localDate);
+      const now = new Date();
+      const occupied = await tx.select({ id: appointment.id }).from(appointment).where(and(
+        eq(appointment.doctorId, record.doctorId),
+        ne(appointment.id, id),
+        or(
+          eq(appointment.status, 'scheduled'),
+          and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now)),
+        ),
+        lt(appointment.startsAt, input.endsAt),
+        gt(appointment.endsAt, input.startsAt),
+      ));
+      if (occupied.length >= capacity) {
+        throw new ConflictException('The selected appointment window has reached its booking capacity.');
       }
 
       try {
@@ -877,6 +951,335 @@ export class AppointmentsService {
     });
   }
 
+  async getScheduleChangeRequestForPatient(requestId: string, patientId: string) {
+    const [request] = await db.select().from(scheduleChangeRequest)
+      .where(eq(scheduleChangeRequest.id, requestId))
+      .limit(1);
+    if (!request || !request.approvedAt) throw new NotFoundException('Approved schedule change request not found.');
+    const affected = await db.select({
+      affected: scheduleChangeAppointment,
+      appointment: {
+        id: appointment.id,
+        startsAt: appointment.startsAt,
+        endsAt: appointment.endsAt,
+        status: appointment.status,
+      },
+    }).from(scheduleChangeAppointment)
+      .innerJoin(appointment, eq(appointment.id, scheduleChangeAppointment.appointmentId))
+      .where(and(eq(scheduleChangeAppointment.requestId, requestId), eq(appointment.patientId, patientId)));
+    if (!affected.length) throw new NotFoundException('Schedule change appointment not found.');
+    const alternatives = await db.select().from(scheduleChangeAlternative)
+      .where(inArray(scheduleChangeAlternative.affectedAppointmentId, affected.map((row) => row.affected.id)));
+    return {
+      request,
+      affectedAppointments: affected.map(({ affected: item, appointment: record }) => ({
+        ...item,
+        appointment: record,
+        alternatives: alternatives.filter((alternative) => alternative.affectedAppointmentId === item.id),
+      })),
+    };
+  }
+
+  async listScheduleChangeRequestsForPatient(patientId: string) {
+    const eligible = await db.select({ requestId: scheduleChangeRequest.id })
+      .from(scheduleChangeAppointment)
+      .innerJoin(appointment, eq(appointment.id, scheduleChangeAppointment.appointmentId))
+      .innerJoin(scheduleChangeRequest, eq(scheduleChangeRequest.id, scheduleChangeAppointment.requestId))
+      .where(and(
+        eq(appointment.patientId, patientId),
+        isNotNull(scheduleChangeRequest.approvedAt),
+      ))
+      .orderBy(desc(scheduleChangeRequest.createdAt));
+    const requestIds = [...new Set(eligible.map(({ requestId }) => requestId))];
+    return Promise.all(requestIds.map((requestId) =>
+      this.getScheduleChangeRequestForPatient(requestId, patientId)));
+  }
+
+  async acceptScheduleChange(
+    requestId: string,
+    affectedAppointmentId: string,
+    alternativeId: string,
+    patientId: string,
+  ) {
+    const now = new Date();
+    const updated = await db.transaction(async (tx) => {
+      const [candidate] = await tx.select({
+        appointmentId: scheduleChangeAppointment.appointmentId,
+      }).from(scheduleChangeAppointment)
+        .where(and(eq(scheduleChangeAppointment.id, affectedAppointmentId), eq(scheduleChangeAppointment.requestId, requestId)))
+        .limit(1);
+      if (!candidate) throw new NotFoundException('Schedule change appointment not found.');
+      const [candidateAppointment] = await tx.select({ doctorId: appointment.doctorId })
+        .from(appointment).where(eq(appointment.id, candidate.appointmentId)).limit(1);
+      if (!candidateAppointment) throw new NotFoundException('Appointment not found.');
+      await this.lockDoctorCapacity(tx, candidateAppointment.doctorId);
+      const [request] = await tx.select().from(scheduleChangeRequest)
+        .where(eq(scheduleChangeRequest.id, requestId)).for('update').limit(1);
+      if (!request || request.status !== 'pending' || !request.approvedAt) {
+        throw new ConflictException('This schedule change is not approved for patient consent.');
+      }
+      if (request.doctorId !== candidateAppointment.doctorId) {
+        throw new ForbiddenException('Schedule change request does not belong to this appointment.');
+      }
+      if (request.expiresAt.getTime() <= now.getTime()) {
+        throw new ConflictException('The schedule change request has expired.');
+      }
+      const [affected] = await tx.select().from(scheduleChangeAppointment)
+        .where(and(eq(scheduleChangeAppointment.id, affectedAppointmentId), eq(scheduleChangeAppointment.requestId, requestId)))
+        .for('update').limit(1);
+      if (!affected) throw new NotFoundException('Schedule change appointment not found.');
+      if (affected.consentStatus !== 'pending' || affected.resolutionStatus !== 'pending') {
+        throw new ConflictException('This appointment already has a recorded response.');
+      }
+      await tx.select({ id: payment.id }).from(payment)
+        .where(eq(payment.appointmentId, affected.appointmentId))
+        .for('update').limit(1);
+      const [record] = await tx.select().from(appointment)
+        .where(and(eq(appointment.id, affected.appointmentId), eq(appointment.patientId, patientId)))
+        .for('update').limit(1);
+      if (!record) throw new NotFoundException('Appointment not found.');
+      if (record.startsAt.getTime() !== affected.originalStartsAt.getTime()
+        || record.endsAt.getTime() !== affected.originalEndsAt.getTime()) {
+        throw new ConflictException('The appointment changed before patient consent was recorded.');
+      }
+      const [alternative] = await tx.select().from(scheduleChangeAlternative)
+        .where(and(eq(scheduleChangeAlternative.id, alternativeId), eq(scheduleChangeAlternative.affectedAppointmentId, affectedAppointmentId)))
+        .limit(1);
+      if (!alternative) throw new BadRequestException('Selected alternative does not belong to this appointment.');
+
+      const parsedSchedule = doctorScheduleUpdateSchema.safeParse(request.proposedSchedule);
+      if (!parsedSchedule.success) throw new ConflictException('The stored schedule proposal is invalid.');
+      const current = this.scheduleService
+        ? await this.scheduleService.getScheduleConfigForDoctor(record.doctorId)
+        : { timezone: 'Asia/Kolkata', slotDurationMinutes: 30 };
+      const proposed = { ...current, ...parsedSchedule.data };
+      const capacityWindow = getBookableRescheduleWindow(alternative.startsAt, alternative.endsAt, now, proposed);
+      if (!capacityWindow) {
+        throw new ConflictException('The selected alternative is no longer available.');
+      }
+      const localDate = new Intl.DateTimeFormat('en-CA', {
+        timeZone: proposed.timezone ?? 'Asia/Kolkata',
+      }).format(alternative.startsAt);
+      const publishedCapacity = await this.getCapacityForDate(tx, record.doctorId, localDate);
+      const override = proposed.dateOverrides?.find((entry) => entry.date === localDate);
+      const capacity = override?.capacity ?? proposed.capacity ?? publishedCapacity;
+      const occupied = await tx.select({ id: appointment.id }).from(appointment).where(and(
+        eq(appointment.doctorId, record.doctorId),
+        ne(appointment.id, record.id),
+        or(eq(appointment.status, 'scheduled'), and(eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, now))),
+        lt(appointment.startsAt, capacityWindow.endsAt),
+        gt(appointment.endsAt, capacityWindow.startsAt),
+      ));
+      if (occupied.length >= capacity) throw new ConflictException('The selected alternative has reached capacity.');
+      const [updated] = await tx.update(appointment).set({
+        startsAt: alternative.startsAt,
+        endsAt: alternative.endsAt,
+        reminderGeneration: sql`${appointment.reminderGeneration} + 1`,
+        updatedAt: now,
+      }).where(and(
+        eq(appointment.id, record.id),
+        eq(appointment.startsAt, affected.originalStartsAt),
+        eq(appointment.endsAt, affected.originalEndsAt),
+        or(eq(appointment.status, 'scheduled'), eq(appointment.status, 'pending_payment')),
+      )).returning();
+      if (!updated) throw new ConflictException('Appointment changed concurrently; please refresh.');
+      await tx.insert(appointmentHistory).values({
+        id: randomUUID(),
+        appointmentId: record.id,
+        actorId: patientId,
+        action: 'schedule_change_rescheduled',
+        previousStartsAt: record.startsAt,
+        previousEndsAt: record.endsAt,
+        newStartsAt: alternative.startsAt,
+        newEndsAt: alternative.endsAt,
+        reason: 'Patient accepted an approved schedule-change alternative.',
+        createdAt: now,
+      });
+      const [resolved] = await tx.update(scheduleChangeAppointment).set({
+        consentStatus: 'accepted',
+        resolutionStatus: 'rescheduled',
+        selectedAlternativeId: alternative.id,
+        respondedAt: now,
+        resolvedAt: now,
+        updatedAt: now,
+      }).where(and(
+        eq(scheduleChangeAppointment.id, affectedAppointmentId),
+        eq(scheduleChangeAppointment.consentStatus, 'pending'),
+        eq(scheduleChangeAppointment.resolutionStatus, 'pending'),
+      )).returning();
+      if (!resolved) throw new ConflictException('Schedule-change consent changed concurrently.');
+      if (this.notifications) {
+        void this.notifications.createNotification({
+          userId: record.doctorId,
+          title: 'Patient accepted a schedule alternative',
+          message: `The patient accepted a new time for appointment ${record.id}.`,
+          type: 'reschedule',
+          appointmentId: record.id,
+          scheduleRequestId: requestId,
+        });
+      }
+      await this.enqueueAppointmentEmails(tx, 'appointment_rescheduled', record, updated.startsAt, randomUUID());
+      await this.appointmentReminders?.cancelForAppointment(tx, record.id);
+      await this.appointmentReminders?.scheduleForAppointment(tx, updated, proposed.timezone ?? 'Asia/Kolkata');
+      return updated;
+    });
+    await this.scheduleService?.finalizeScheduleRequest(updated.doctorId, requestId);
+    return updated;
+  }
+
+  async declineScheduleChange(requestId: string, affectedAppointmentId: string, patientId: string, reason?: string) {
+    const now = new Date();
+    const outcome = await db.transaction(async (tx) => {
+      const [candidate] = await tx.select({
+        appointmentId: scheduleChangeAppointment.appointmentId,
+      }).from(scheduleChangeAppointment)
+        .where(and(eq(scheduleChangeAppointment.id, affectedAppointmentId), eq(scheduleChangeAppointment.requestId, requestId)))
+        .limit(1);
+      if (!candidate) throw new NotFoundException('Schedule change appointment not found.');
+      const [candidateAppointment] = await tx.select({ doctorId: appointment.doctorId })
+        .from(appointment).where(eq(appointment.id, candidate.appointmentId)).limit(1);
+      if (!candidateAppointment) throw new NotFoundException('Appointment not found.');
+      await this.lockDoctorCapacity(tx, candidateAppointment.doctorId);
+      const [request] = await tx.select().from(scheduleChangeRequest)
+        .where(eq(scheduleChangeRequest.id, requestId)).for('update').limit(1);
+      if (!request || request.status !== 'pending' || !request.approvedAt) {
+        throw new ConflictException('This schedule change is not available for patient response.');
+      }
+      if (request.doctorId !== candidateAppointment.doctorId) {
+        throw new ForbiddenException('Schedule change request does not belong to this appointment.');
+      }
+      if (request.expiresAt.getTime() <= now.getTime()) throw new ConflictException('The schedule change request has expired.');
+      const [affected] = await tx.select().from(scheduleChangeAppointment)
+        .where(and(eq(scheduleChangeAppointment.id, affectedAppointmentId), eq(scheduleChangeAppointment.requestId, requestId)))
+        .for('update').limit(1);
+      if (!affected) throw new NotFoundException('Schedule change appointment not found.');
+      if (affected.consentStatus !== 'pending' || affected.resolutionStatus !== 'pending') {
+        throw new ConflictException('This appointment already has a recorded response.');
+      }
+      const [record] = await tx.select({
+        id: appointment.id,
+        patientId: appointment.patientId,
+        doctorId: appointment.doctorId,
+      }).from(appointment)
+        .where(and(eq(appointment.id, affected.appointmentId), eq(appointment.patientId, patientId)))
+        .for('update').limit(1);
+      if (!record) throw new NotFoundException('Appointment not found.');
+      const [resolved] = await tx.update(scheduleChangeAppointment).set({
+        consentStatus: 'declined',
+        resolutionStatus: 'cancelled',
+        respondedAt: now,
+        responseReason: reason ?? null,
+        updatedAt: now,
+      }).where(and(eq(scheduleChangeAppointment.id, affectedAppointmentId), eq(scheduleChangeAppointment.consentStatus, 'pending'))).returning();
+      if (!resolved) throw new ConflictException('Schedule-change consent changed concurrently.');
+      if (this.notifications) {
+        void this.notifications.createNotification({
+          userId: record.patientId,
+          title: 'Schedule change declined',
+          message: 'Your response was recorded. Your appointment remains at its current time.',
+          type: 'reschedule',
+          appointmentId: record.id,
+          scheduleRequestId: requestId,
+        });
+        void this.notifications.createNotification({
+          userId: record.doctorId,
+          title: 'Patient declined a schedule alternative',
+          message: `The patient declined an alternative for appointment ${record.id}.`,
+          type: 'reschedule',
+          appointmentId: record.id,
+          scheduleRequestId: requestId,
+        });
+      }
+      return { resolved, doctorId: record.doctorId };
+    });
+    await this.scheduleService?.finalizeScheduleRequest(outcome.doctorId, requestId);
+    return outcome.resolved;
+  }
+
+  async cancelUnresolvedScheduleChange(
+    requestId: string,
+    affectedAppointmentId: string,
+    doctorId: string,
+    reason: string,
+  ) {
+    await this.assertDoctorApproved('doctor', doctorId);
+    const now = new Date();
+    const outcome = await db.transaction(async (tx) => {
+      // Lock order: doctor profile -> request -> affected appointment -> payment -> appointment.
+      // Patient acceptance follows the same order, so only one path can resolve the item.
+      await this.lockDoctorCapacity(tx, doctorId);
+      const [affected] = await tx.select().from(scheduleChangeAppointment)
+        .where(and(
+          eq(scheduleChangeAppointment.id, affectedAppointmentId),
+          eq(scheduleChangeAppointment.requestId, requestId),
+        )).limit(1);
+      if (!affected) throw new NotFoundException('Schedule change appointment not found.');
+
+      const [request] = await tx.select().from(scheduleChangeRequest)
+        .where(and(eq(scheduleChangeRequest.id, requestId), eq(scheduleChangeRequest.doctorId, doctorId)))
+        .for('update').limit(1);
+      if (!request || request.status !== 'pending') {
+        throw new ConflictException('Only pending requests can be cancelled.');
+      }
+      if (request.expiresAt.getTime() <= now.getTime()) {
+        throw new ConflictException('The schedule change request has expired.');
+      }
+      if (affected.consentStatus !== 'pending' || affected.resolutionStatus !== 'pending') {
+        throw new ConflictException('Only unresolved appointments in a pending request can be cancelled.');
+      }
+      const [lockedAffected] = await tx.select().from(scheduleChangeAppointment)
+        .where(eq(scheduleChangeAppointment.id, affectedAppointmentId))
+        .for('update').limit(1);
+      if (!lockedAffected || lockedAffected.consentStatus !== 'pending' || lockedAffected.resolutionStatus !== 'pending') {
+        throw new ConflictException('Only unresolved appointments in a pending request can be cancelled.');
+      }
+
+      const cancelled = await this.cancelAppointmentInTransaction(tx, lockedAffected.appointmentId, {
+        id: doctorId,
+        role: 'doctor',
+        name: '',
+        email: '',
+      });
+
+      const [resolved] = await tx.update(scheduleChangeAppointment).set({
+        consentStatus: 'declined',
+        resolutionStatus: 'cancelled',
+        respondedAt: now,
+        resolvedAt: now,
+        responseReason: reason,
+        updatedAt: now,
+      }).where(and(
+        eq(scheduleChangeAppointment.id, affectedAppointmentId),
+        eq(scheduleChangeAppointment.consentStatus, 'pending'),
+        eq(scheduleChangeAppointment.resolutionStatus, 'pending'),
+      )).returning();
+      if (!resolved) throw new ConflictException('Schedule-change appointment changed concurrently.');
+      await tx.insert(appointmentHistory).values({
+        id: randomUUID(),
+        appointmentId: lockedAffected.appointmentId,
+        actorId: doctorId,
+        action: 'schedule_change_cancelled',
+        reason,
+        createdAt: now,
+      });
+      return { ...cancelled, resolved };
+    });
+
+    await this.notifyAppointmentCancelled(outcome.record, outcome.updated.id);
+    const refund = await this.processCancellationRefund(
+      doctorId,
+      outcome.updated.id,
+      outcome.paymentIdToRefund,
+      outcome.remainingPaise,
+      'doctor',
+    );
+    await this.scheduleService?.finalizeScheduleRequest(doctorId, requestId);
+    return {
+      appointment: { ...outcome.updated, refund },
+      scheduleChangeAppointment: outcome.resolved,
+    };
+  }
+
   async cancel(id: string, actor: AuthenticatedUser) {
     if (actor.role === 'doctor') {
       await this.assertDoctorApproved(actor.role, actor.id);
@@ -885,6 +1288,29 @@ export class AppointmentsService {
     }
 
     const { updated, record, paymentIdToRefund, remainingPaise } = await db.transaction(async (tx) => {
+      return this.cancelAppointmentInTransaction(tx, id, actor);
+    });
+
+    await this.notifyAppointmentCancelled(record, id);
+    const refundResult = await this.processCancellationRefund(
+      actor.id,
+      id,
+      paymentIdToRefund,
+      remainingPaise,
+      actor.role,
+    );
+
+    return {
+      ...updated,
+      refund: refundResult ?? null,
+    };
+  }
+
+  private async cancelAppointmentInTransaction(
+    tx: AppointmentTransaction,
+    id: string,
+    actor: AuthenticatedUser,
+  ) {
       // 1. Lock payment row FIRST to guarantee consistent global lock order (payment -> appointment) with verifyPayment and webhook
       const [payRecord] = await tx
         .select({
@@ -948,15 +1374,19 @@ export class AppointmentsService {
       await this.appointmentReminders?.cancelForAppointment(tx, id);
 
       return { updated, record, paymentIdToRefund, remainingPaise };
-    });
+  }
 
+  private async notifyAppointmentCancelled(
+    record: { patientId: string; doctorId: string },
+    appointmentId: string,
+  ): Promise<void> {
     if (this.notifications) {
       void this.notifications.createNotification({
         userId: record.patientId,
         title: 'Appointment Cancelled',
         message: 'Appointment was cancelled and the time slot was released.',
         type: 'cancellation',
-        appointmentId: id,
+        appointmentId,
       });
 
       void this.notifications.createNotification({
@@ -964,31 +1394,38 @@ export class AppointmentsService {
         title: 'Appointment Cancelled',
         message: 'A patient consultation was cancelled and the slot was released.',
         type: 'cancellation',
-        appointmentId: id,
+        appointmentId,
       });
     }
+  }
 
-    // Trigger immediate refund for paid appointment outside of DB transaction
+  private async processCancellationRefund(
+    actorId: string,
+    appointmentId: string,
+    paymentIdToRefund: string | null,
+    remainingPaise: number,
+    actorRole: 'doctor' | 'patient',
+  ) {
     let refundResult = null;
     if (paymentIdToRefund) {
       if (!this.payments) {
-        const errorMsg = `PaymentsService is required to process refund for cancelled appointment ${id} (payment: ${paymentIdToRefund}), but no PaymentsService instance was provided.`;
+        const errorMsg = `PaymentsService is required to process refund for cancelled appointment ${appointmentId} (payment: ${paymentIdToRefund}), but no PaymentsService instance was provided.`;
         this.logger.error(errorMsg);
         throw new Error(errorMsg);
       }
       try {
         refundResult = await this.payments.refundPayment(
-          actor.id,
+          actorId,
           'system',
           paymentIdToRefund,
           {
-            reason: `Appointment cancelled by ${actor.role}`,
+            reason: `Appointment cancelled by ${actorRole}`,
             amountPaise: remainingPaise,
           },
         );
       } catch (err: any) {
         this.logger.error(
-          `Immediate refund failed for cancelled appointment ${id} (payment: ${paymentIdToRefund}): ${err?.message}`,
+          `Immediate refund failed for cancelled appointment ${appointmentId} (payment: ${paymentIdToRefund}): ${err?.message}`,
           err?.stack,
         );
         // Note: Do not throw. Appointment is safely cancelled;
@@ -996,10 +1433,7 @@ export class AppointmentsService {
       }
     }
 
-    return {
-      ...updated,
-      refund: refundResult ?? null,
-    };
+    return refundResult;
   }
 
   async complete(id: string, actor: AuthenticatedUser) {
