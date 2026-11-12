@@ -265,3 +265,116 @@ export function isBookableSlot(
       slot.endsAt.getTime() === endsAt.getTime()
   );
 }
+
+/**
+ * Validates a schedule-change interval and returns the availability window
+ * whose capacity it consumes. Ordinary offered slots retain exact-boundary
+ * validation; legacy 15-minute appointments may use either half of a 30-minute
+ * Wave session without changing their duration.
+ */
+export function getBookableRescheduleWindow(
+  startsAt: Date,
+  endsAt: Date,
+  now = new Date(),
+  config?: DoctorScheduleConfig,
+): AppointmentSlot | null {
+  if (startsAt.getTime() <= now.getTime() || endsAt.getTime() <= startsAt.getTime()) return null;
+  if (isBookableSlot(startsAt, endsAt, now, config)) return { startsAt, endsAt };
+
+  const timezone = config?.timezone ?? 'Asia/Kolkata';
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(startsAt);
+  if (getModeForDate(date, config) !== 'wave' ||
+    getDurationForDate(date, config) !== APPOINTMENT_SLOT_MINUTES ||
+    endsAt.getTime() - startsAt.getTime() !== STREAM_SLOT_MINUTES * 60_000) {
+    return null;
+  }
+
+  const halfSlotMs = STREAM_SLOT_MINUTES * 60_000;
+  const containingSession = candidateSlotsForDate(date, now, { ...config, timezone }).find((slot) =>
+    (startsAt.getTime() === slot.startsAt.getTime() ||
+      startsAt.getTime() === slot.startsAt.getTime() + halfSlotMs) &&
+    endsAt.getTime() === startsAt.getTime() + halfSlotMs &&
+    endsAt.getTime() <= slot.endsAt.getTime());
+  return containingSession ?? null;
+}
+
+export function isAppointmentCompatibleWithSchedule(
+  startsAt: Date,
+  endsAt: Date,
+  now = new Date(),
+  config?: DoctorScheduleConfig,
+): boolean {
+  if (endsAt.getTime() <= startsAt.getTime()) return false;
+  const tz = config?.timezone ?? 'Asia/Kolkata';
+  const dateInTz = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(startsAt);
+  // Allow evaluating in-progress appointments against candidate slots
+  const referenceTime = new Date(Math.min(now.getTime(), startsAt.getTime() - 1));
+
+  return candidateSlotsForDate(dateInTz, referenceTime, { ...config, timezone: tz }).some(
+    (slot) =>
+      slot.startsAt.getTime() === startsAt.getTime() &&
+      slot.endsAt.getTime() === endsAt.getTime()
+  );
+}
+
+/**
+ * Identifies appointments that exceed the proposed schedule's per-slot capacity.
+ * Each appointment is checked against the candidate slot it overlaps; when more
+ * appointments overlap a single slot than the config's capacity allows, the
+ * excess appointments are returned as capacity conflicts.
+ *
+ * Appointments that don't fit any slot (time-incompatible) are NOT included —
+ * those are caught separately by `isAppointmentCompatibleWithSchedule`.
+ */
+export function findCapacityConflicts<T extends { id: string; startsAt: Date; endsAt: Date; status: string }>(
+  appointments: T[],
+  now: Date,
+  config?: DoctorScheduleConfig,
+): Array<T & { reason: string }> {
+  // Group appointments by the date (in schedule timezone) they fall on
+  const tz = config?.timezone ?? 'Asia/Kolkata';
+  const byDate = new Map<string, T[]>();
+  for (const appt of appointments) {
+    const date = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(appt.startsAt);
+    const list = byDate.get(date) ?? [];
+    list.push(appt);
+    byDate.set(date, list);
+  }
+
+  const defaultCapacity = config?.capacity ?? 1;
+  const conflictIds = new Set<string>();
+
+  for (const [date, dateAppointments] of byDate) {
+    const dateCapacity = getCapacityForDate(date, config) ?? defaultCapacity;
+    // Generate candidate slots for the entire day so in-progress slots are also evaluated
+    const minStart = dateAppointments.reduce((min, a) => Math.min(min, a.startsAt.getTime()), Number.POSITIVE_INFINITY);
+    const referenceTime = new Date(Math.min(now.getTime(), minStart - 1));
+    const slots = candidateSlotsForDate(date, referenceTime, { ...config, timezone: tz });
+
+    for (const slot of slots) {
+      // Find all appointments that overlap this slot using strict interval overlap and not already conflicted
+      const overlapping = dateAppointments.filter(appt =>
+        !conflictIds.has(appt.id) &&
+        appt.startsAt.getTime() < slot.endsAt.getTime() &&
+        appt.endsAt.getTime() > slot.startsAt.getTime(),
+      );
+      if (overlapping.length <= dateCapacity) continue;
+
+      // Sort deterministically: earlier start times first, then by ID
+      overlapping.sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime() || a.id.localeCompare(b.id));
+
+      // Mark the excess appointments as conflicts (keep the first `dateCapacity`
+      // appointments as the ones that "fit")
+      for (let i = dateCapacity; i < overlapping.length; i++) {
+        conflictIds.add(overlapping[i]!.id);
+      }
+    }
+  }
+
+  return appointments
+    .filter(appt => conflictIds.has(appt.id))
+    .map(appt => ({
+      ...appt,
+      reason: `Exceeds per-slot capacity (${defaultCapacity}) under the proposed schedule.`,
+    }));
+}
