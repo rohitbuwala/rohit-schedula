@@ -17,7 +17,22 @@ npm run start:dev
 
 Drizzle migrations are generated in `drizzle/`. Review generated SQL before applying it to a shared or production database. Better Auth is mounted at `/api/auth`; email and password signup creates patient accounts by default. The role field is server-managed.
 
+## Doctor assistant reads
+
+Approved doctors can send these messages to `POST /api/assistant/chat`:
+
+- **Appointment statistics for today** or **Appointment statistics for 2026-11-12**. The date uses the doctor's schedule timezone. The response includes a total and counts for pending payment, scheduled, completed, and cancelled appointments.
+- **Check schedule conflicts from 2026-11-12T09:00+05:30 to 2026-11-12T10:00+05:30**. Use two ISO timestamps with UTC offsets or `Z`, at most seven days apart. The response lists up to 50 of the doctor's overlapping scheduled appointments with appointment IDs and times. Adjacent appointments do not overlap.
+
+These tools perform read-only queries. Gemini selects the tool from scheduling keywords. The backend resolves dates, ranges, and the authenticated doctor.
+
 The minimal `db:check` command runs `select 1` and reports connection status without printing credentials or database details.
+
+## Appointment booking retries and hold recovery
+
+Appointment creation accepts an optional UUID `Idempotency-Key` header. A patient retry with the same key and the same doctor and slot returns the same appointment; a different payload returns HTTP 409. The key is scoped to the authenticated patient and must be retained by the client to recover after a lost response. A replay returns the appointment's current status and hold expiry, if present; it does not renew an expired hold. Existing requests without the header keep their existing behavior.
+
+`GET /api/appointments/:id/hold` is patient-only and returns an owned, unexpired `pending_payment` hold; missing, expired, paid, or other patients' holds return 404. Creating or recovering a hold does not mark it scheduled; existing payment verification remains required. The idempotency table is introduced by `drizzle/0017_appointment_idempotency.sql`; apply migrations in order to the intended database before using keyed requests.
 
 ## Appointment reminders
 
