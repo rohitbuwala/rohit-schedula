@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Header, Headers, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { z } from 'zod';
 import { AuthSessionGuard } from '../auth/auth-session.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
@@ -7,7 +7,7 @@ import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { DoctorApprovedGuard } from '../doctors/doctor-approved.guard.js';
 import { AppointmentsService } from './appointments.service.js';
-import { appointmentBookingSchema } from './appointment-booking.schema.js';
+import { appointmentBookingReplaySchema, appointmentBookingSchema } from './appointment-booking.schema.js';
 import { appointmentAvailabilityQuerySchema } from './appointment-availability.schema.js';
 import { appointmentRescheduleSchema } from './appointment-reschedule.schema.js';
 
@@ -20,10 +20,21 @@ export class AppointmentsController {
 
   @Post()
   @Roles('patient')
-  create(@CurrentUser() patient: AuthenticatedUser, @Body() body: unknown) {
-    const parsed = appointmentBookingSchema.safeParse(body);
+  create(@CurrentUser() patient: AuthenticatedUser, @Body() body: unknown, @Headers('idempotency-key') key?: string,
+    @Headers('x-booking-patient') expectedPatient?: string) {
+    if (expectedPatient !== undefined && expectedPatient !== patient.id) throw new ForbiddenException('The booking session changed.');
+    if (key !== undefined && !z.uuid().safeParse(key).success) throw new BadRequestException('Invalid idempotency key.');
+    const parsed = (key ? appointmentBookingReplaySchema : appointmentBookingSchema).safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    return this.appointments.createForPatient(patient.id, parsed.data);
+    return key ? this.appointments.createForPatient(patient.id, parsed.data, key) : this.appointments.createForPatient(patient.id, parsed.data);
+  }
+
+  @Get(':id/hold')
+  @Roles('patient')
+  @Header('Cache-Control', 'no-store')
+  recoverHold(@CurrentUser() patient: AuthenticatedUser, @Param('id') id: string) {
+    if (!idSchema.safeParse(id).success) throw new BadRequestException('Invalid appointment id.');
+    return this.appointments.recoverPatientHold(patient.id, id);
   }
 
   @Get('availability')

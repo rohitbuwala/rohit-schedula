@@ -1,3 +1,4 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { DoctorScheduleService } from './doctor-schedule.service.js';
 import { db } from '../db/database.js';
 
@@ -40,6 +41,24 @@ describe('doctor schedule service persistence', () => {
         update: db.update,
         delete: db.delete,
       }))) as never);
+  });
+
+  it('checks strictly overlapping scheduled rows scoped to the doctor and caps details', async () => {
+    const startsAt = new Date('2026-11-12T04:30Z');
+    const endsAt = new Date('2026-11-12T05:30Z');
+    const rows = Array.from({ length: 51 }, (_, index) => ({ id: String(index), startsAt, endsAt }));
+    const query = {
+      from: vi.fn().mockReturnThis(), where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(), limit: vi.fn().mockResolvedValue(rows),
+    };
+    vi.mocked(db.select).mockReturnValueOnce(query as never);
+    const service = new DoctorScheduleService();
+    await expect(service.checkTimeRangeConflicts(doctorId, { startsAt, endsAt }))
+      .resolves.toEqual({ conflicts: rows.slice(0, 50), hasMore: true });
+    const predicate = new PgDialect().sqlToQuery(query.where.mock.calls[0][0]);
+    expect(predicate.sql).toMatch(/"doctor_id" = .*"status" = .*"starts_at" < .*"ends_at" >/);
+    expect(predicate.params).toEqual([doctorId, 'scheduled', endsAt.toISOString(), startsAt.toISOString()]);
+    expect(Object.keys(vi.mocked(db.select).mock.lastCall?.[0] ?? {})).toEqual(['id', 'startsAt', 'endsAt']);
   });
 
   it('returns existing weekly defaults when the database has no saved schedule', async () => {
