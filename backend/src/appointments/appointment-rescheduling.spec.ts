@@ -165,6 +165,41 @@ describe('appointment rescheduling controller & service', () => {
     ).rejects.toThrow(ConflictException);
   });
 
+  it('rejects stale previews and changed availability before writing', async () => {
+    const startsAt = new Date('2027-01-04T09:00:00Z');
+    const slot = { startsAt: new Date('2027-01-04T10:00:00Z'), endsAt: new Date('2027-01-04T10:30:00Z') };
+    const actor = { id: patientId, role: 'patient' } as AuthenticatedUser;
+    const getScheduleConfigForDoctor = vi.fn().mockResolvedValue({
+      timezone: 'UTC', activeDays: [1], startHour: 9, endHour: 17, slotDurationMinutes: 30, leaveDates: ['2027-01-04'],
+    });
+    const service = new AppointmentsService({ isApproved: vi.fn().mockResolvedValue(true) } as never, { getScheduleConfigForDoctor } as never);
+    const record = { id: appointmentId, patientId, doctorId, startsAt, status: 'scheduled' };
+    const stale = mockTransactionWith(record);
+    await expect(service.reschedule(appointmentId, actor, slot, new Date('2027-01-04T09:30:00Z')))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(stale.update).not.toHaveBeenCalled();
+    const tx = mockTransactionWith(record);
+    await expect(service.reschedule(appointmentId, actor, slot, startsAt)).rejects.toBeInstanceOf(ConflictException);
+    expect(getScheduleConfigForDoctor).toHaveBeenCalledWith(doctorId);
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
+  it('returns a conflict when PostgreSQL rejects a competing slot update', async () => {
+    const startsAt = new Date('2027-01-04T09:00:00Z');
+    const endsAt = new Date('2027-01-04T09:30:00Z');
+    const slot = { startsAt: new Date('2027-01-04T10:00:00Z'), endsAt: new Date('2027-01-04T10:30:00Z') };
+    const service = new AppointmentsService({ isApproved: vi.fn().mockResolvedValue(true) } as never, {
+      getScheduleConfigForDoctor: vi.fn().mockResolvedValue({ timezone: 'UTC', activeDays: [1], startHour: 9, endHour: 17, slotDurationMinutes: 30 }),
+    } as never);
+    const tx = mockTransactionWith({ id: appointmentId, patientId, doctorId, startsAt, endsAt, status: 'scheduled' });
+    tx.update.mockImplementationOnce(() => {
+      throw new Error('Failed query', { cause: { code: '23P01' } });
+    });
+    await expect(service.reschedule(appointmentId, { id: patientId, role: 'patient' } as AuthenticatedUser, slot, startsAt))
+      .rejects.toBeInstanceOf(ConflictException);
+    expect(tx.update).toHaveBeenCalledOnce();
+  });
+
   it('rejects duration that is not 30 minutes with BadRequestException', async () => {
     mockTransactionWith({
       id: appointmentId,

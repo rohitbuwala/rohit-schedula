@@ -9,7 +9,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, gt, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '../db/database.js';
 import { appointment, doctorAvailability, doctorProfile, doctorScheduleOverride, payment, refund, user } from '../db/schema.js';
 import { loadEnv, type AppEnvironment } from '../config/env.js';
@@ -71,6 +71,7 @@ export class PaymentsService {
     tx: PaymentsTransaction,
     target: { id: string; doctorId: string; startsAt: Date; endsAt: Date },
   ): Promise<boolean> {
+    if (target.startsAt.getTime() <= Date.now()) return false;
     try {
       await reserveWithinCapacity(
         () => this.lockDoctorCapacity(tx, target.doctorId),
@@ -272,23 +273,38 @@ export class PaymentsService {
 
     const amountPaise = feeInr * 100;
 
-    // Prevent duplicate orders: check existing payment record
-    const [existingPayment] = await db
+    // SEC-2D-01: Prevent duplicate orders: prioritize captured or active created payment
+    const paymentQuery = db
       .select()
       .from(payment)
-      .where(eq(payment.appointmentId, record.id))
-      .limit(1);
+      .where(
+        and(
+          eq(payment.appointmentId, record.id),
+          inArray(payment.status, ['captured', 'created']),
+        ),
+      );
 
-    if (existingPayment) {
-      if (existingPayment.status === 'captured') {
+    const orderedPaymentQuery =
+      typeof (paymentQuery as any).orderBy === 'function'
+        ? (paymentQuery as any).orderBy(
+            sql`CASE WHEN ${payment.status} = 'captured' THEN 1 ELSE 2 END`,
+            desc(payment.createdAt),
+          )
+        : paymentQuery;
+
+    const existingPayments = await orderedPaymentQuery.limit(1);
+
+    const activeOrCaptured = existingPayments[0];
+    if (activeOrCaptured) {
+      if (activeOrCaptured.status === 'captured') {
         throw new ConflictException('Appointment has already been paid for.');
       }
-      if (existingPayment.status === 'created') {
+      if (activeOrCaptured.status === 'created') {
         // Idempotent: reuse existing active order
         return {
-          orderId: existingPayment.razorpayOrderId,
-          amountPaise: existingPayment.amountPaise,
-          currency: existingPayment.currency,
+          orderId: activeOrCaptured.razorpayOrderId,
+          amountPaise: activeOrCaptured.amountPaise,
+          currency: activeOrCaptured.currency,
           keyId: this.env.razorpayKeyId,
           appointmentId: record.id,
         };
@@ -332,8 +348,45 @@ export class PaymentsService {
   }
 
   /**
+   * Automatically retries database operations on PostgreSQL deadlock (40P01)
+   * or serialization failure (40001) errors up to maxRetries times with jittered backoff.
+   */
+  async withDeadlockRetry<T>(
+    operation: () => Promise<T>,
+    maxRetries = 2,
+    baseDelayMs = 50,
+  ): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await operation();
+      } catch (err: unknown) {
+        const isDeadlockOrSerialization =
+          typeof err === 'object' &&
+          err !== null &&
+          'code' in err &&
+          ((err as { code: string }).code === '40P01' ||
+            (err as { code: string }).code === '40001' ||
+            (err as { code: string }).code === '55P03');
+
+        if (isDeadlockOrSerialization && attempt < maxRetries) {
+          attempt++;
+          this.logger.warn(
+            `Transaction encountered ${(err as { code: string }).code} (retry ${attempt}/${maxRetries}). Retrying with backoff...`,
+          );
+          const jitter = Math.floor(Math.random() * 25);
+          await new Promise((resolve) => setTimeout(resolve, baseDelayMs * attempt + jitter));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  /**
    * Cryptographically verifies Razorpay payment signature and confirms appointment to `scheduled`.
    * Safely handles race conditions with hold expiration and slot reassignment.
+   * Follows strict global lock hierarchy: doctorProfile -> payment -> appointment.
    */
   async verifyPayment(patientId: string, input: VerifyPaymentDto) {
     // 1. Verify HMAC-SHA256 signature
@@ -348,86 +401,102 @@ export class PaymentsService {
       throw new BadRequestException('Invalid payment signature.');
     }
 
-    // 2. Fetch payment and appointment records inside transaction with consistent global row-level lock order: payment -> appointment
-    const verificationResult = await db.transaction(async (tx) => {
-      // Step 2a: Lock payment row FIRST
-      const [paymentRecord] = await tx
-        .select()
-        .from(payment)
-        .where(eq(payment.razorpayOrderId, input.razorpayOrderId))
-        .for('update')
-        .limit(1);
+    // 2. Fetch payment and appointment records inside transaction with canonical lock order: payment -> appointment
+    const verificationResult = await this.withDeadlockRetry(async () => {
+      return db.transaction(async (tx) => {
+        // Step 2a: Lock payment row FIRST
+        const [paymentRecord] = await tx
+          .select()
+          .from(payment)
+          .where(eq(payment.razorpayOrderId, input.razorpayOrderId))
+          .for('update')
+          .limit(1);
 
-      if (!paymentRecord) {
-        throw new NotFoundException('Payment order not found.');
-      }
+        if (!paymentRecord) {
+          throw new NotFoundException('Payment order not found.');
+        }
 
-      if (paymentRecord.appointmentId !== input.appointmentId) {
-        throw new BadRequestException('Payment order does not correspond to this appointment.');
-      }
+        if (paymentRecord.appointmentId !== input.appointmentId) {
+          throw new BadRequestException('Payment order does not correspond to this appointment.');
+        }
 
-      if (paymentRecord.patientId !== patientId) {
-        throw new ForbiddenException('You are not authorized to verify this payment.');
-      }
+        if (paymentRecord.patientId !== patientId) {
+          throw new ForbiddenException('You are not authorized to verify this payment.');
+        }
 
-      // Idempotency: if already captured, return success immediately
-      if (paymentRecord.status === 'captured') {
-        return {
-          success: true,
-          appointmentId: paymentRecord.appointmentId,
-          paymentId: paymentRecord.id,
-          status: 'captured',
-          message: 'Payment has already been processed.',
-        };
-      }
+        // A captured payment does not necessarily mean the appointment was scheduled.
+        if (paymentRecord.status === 'captured') {
+          const [ownedAppointment] = await tx.select({ status: appointment.status })
+            .from(appointment)
+            .where(and(eq(appointment.id, paymentRecord.appointmentId), eq(appointment.patientId, patientId)))
+            .for('update').limit(1);
+          if (!ownedAppointment) throw new NotFoundException('Appointment record not found.');
+          const lateCapture = paymentRecord.failureReason === 'Slot reassigned after hold expiry. Queued for refund/reconciliation.';
+          if (lateCapture || ownedAppointment.status !== 'scheduled') {
+            return {
+              success: false, lateCapture, replayed: true,
+              appointmentId: paymentRecord.appointmentId, paymentId: paymentRecord.id, status: 'captured',
+              message: lateCapture
+                ? 'Payment was captured, but your appointment hold expired and the slot was taken. A full refund has been queued.'
+                : 'Payment was captured, but the appointment is not scheduled. Please check its status.',
+            };
+          }
+          return {
+            success: true,
+            appointmentId: paymentRecord.appointmentId,
+            paymentId: paymentRecord.id,
+            status: 'captured',
+            message: 'Payment has already been processed.',
+          };
+        }
 
-      const isAllowedStatus =
-        paymentRecord.status === 'created' ||
-        (paymentRecord.status === 'failed' &&
-          paymentRecord.failureReason?.toLowerCase().includes('expired'));
+        const isAllowedStatus =
+          paymentRecord.status === 'created' ||
+          (paymentRecord.status === 'failed' &&
+            paymentRecord.failureReason?.toLowerCase().includes('expired'));
 
-      if (!isAllowedStatus) {
-        throw new BadRequestException(`Cannot verify payment with status: ${paymentRecord.status}`);
-      }
+        if (!isAllowedStatus) {
+          throw new BadRequestException(`Cannot verify payment with status: ${paymentRecord.status}`);
+        }
 
-      // Verify payment details with Razorpay API
-      const rzpPayment = await this.razorpay.payments.fetch(input.razorpayPaymentId);
-      if (rzpPayment.order_id !== paymentRecord.razorpayOrderId) {
-        throw new BadRequestException('Payment does not match the expected Razorpay order.');
-      }
-      if (Number(rzpPayment.amount) !== paymentRecord.amountPaise) {
-        throw new BadRequestException('Paid amount does not match the required consultation fee.');
-      }
-      if (rzpPayment.currency !== paymentRecord.currency) {
-        throw new BadRequestException('Payment currency mismatch.');
-      }
-      if (rzpPayment.status !== 'captured' && rzpPayment.status !== 'authorized') {
-        throw new BadRequestException(`Payment is not in an authorized or captured state: ${rzpPayment.status}`);
-      }
+        // Verify payment details with Razorpay API
+        const rzpPayment = await this.razorpay.payments.fetch(input.razorpayPaymentId);
+        if (rzpPayment.order_id !== paymentRecord.razorpayOrderId) {
+          throw new BadRequestException('Payment does not match the expected Razorpay order.');
+        }
+        if (Number(rzpPayment.amount) !== paymentRecord.amountPaise) {
+          throw new BadRequestException('Paid amount does not match the required consultation fee.');
+        }
+        if (rzpPayment.currency !== paymentRecord.currency) {
+          throw new BadRequestException('Payment currency mismatch.');
+        }
+        if (rzpPayment.status !== 'captured' && rzpPayment.status !== 'authorized') {
+          throw new BadRequestException(`Payment is not in an authorized or captured state: ${rzpPayment.status}`);
+        }
 
-      // Step 2b: Lock appointment row SECOND
-      const [apptRecord] = await tx
-        .select({
-          id: appointment.id,
-          doctorId: appointment.doctorId,
-          startsAt: appointment.startsAt,
-          endsAt: appointment.endsAt,
-          status: appointment.status,
-        })
-        .from(appointment)
-        .where(eq(appointment.id, paymentRecord.appointmentId))
-        .for('update')
-        .limit(1);
+        // Step 2b: Lock appointment row SECOND
+        const [apptRecord] = await tx
+          .select({
+            id: appointment.id,
+            doctorId: appointment.doctorId,
+            startsAt: appointment.startsAt,
+            endsAt: appointment.endsAt,
+            status: appointment.status,
+          })
+          .from(appointment)
+          .where(eq(appointment.id, paymentRecord.appointmentId))
+          .for('update')
+          .limit(1);
 
-      if (!apptRecord) {
-        throw new NotFoundException('Appointment record not found.');
-      }
+        if (!apptRecord) {
+          throw new NotFoundException('Appointment record not found.');
+        }
 
-      // Check if slot was reassigned after hold expired
-      let canConfirm = true;
-      if (apptRecord.status === 'cancelled') {
-        canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
-      }
+        // Check if slot was reassigned after hold expired or if slot time has already passed
+        let canConfirm = true;
+        if (apptRecord.status === 'cancelled') {
+          canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
+        }
 
       if (!canConfirm) {
         // Late captured payment: slot is no longer available. Mark for refund/reconciliation.
@@ -560,9 +629,10 @@ export class PaymentsService {
         endsAt: updatedAppt?.endsAt.toISOString(),
       };
     });
+  });
 
     // Auto-trigger late payment reconciliation if slot was reassigned
-    if ('lateCapture' in verificationResult && verificationResult.lateCapture) {
+    if ('lateCapture' in verificationResult && verificationResult.lateCapture && !('replayed' in verificationResult && verificationResult.replayed)) {
       void this.reconcileLatePayment(verificationResult.paymentId);
     }
 
@@ -856,45 +926,78 @@ export class PaymentsService {
 
       let reassignedPaymentId: string | null = null;
 
-      const result = await db.transaction(async (tx) => {
-        // Step 1: Lock payment row FIRST
-        const [paymentRecord] = await tx
-          .select()
-          .from(payment)
-          .where(eq(payment.razorpayOrderId, orderId))
-          .for('update')
-          .limit(1);
+      const result = await this.withDeadlockRetry(async () => {
+        return db.transaction(async (tx) => {
+          // Step 1: Lock payment row FIRST
+          const [paymentRecord] = await tx
+            .select()
+            .from(payment)
+            .where(eq(payment.razorpayOrderId, orderId))
+            .for('update')
+            .limit(1);
 
-        if (!paymentRecord) {
-          return { received: true, note: 'Payment record not found.' };
-        }
+          if (!paymentRecord) {
+            return { received: true, note: 'Payment record not found.' };
+          }
 
-        if (paymentRecord.status === 'captured') {
-          return { received: true, note: 'Already captured.' };
-        }
+          if (paymentRecord.status === 'captured') {
+            return { received: true, note: 'Already captured.' };
+          }
 
-        // Step 2: Lock appointment row SECOND
-        const [apptRecord] = await tx
-          .select({
-            id: appointment.id,
-            doctorId: appointment.doctorId,
-            startsAt: appointment.startsAt,
-            endsAt: appointment.endsAt,
-            status: appointment.status,
-          })
-          .from(appointment)
-          .where(eq(appointment.id, paymentRecord.appointmentId))
-          .for('update')
-          .limit(1);
+          const expectedAmount =
+            paymentEntity?.amount !== undefined
+              ? Number(paymentEntity.amount)
+              : payload?.payload?.order?.entity?.amount !== undefined
+                ? Number(payload?.payload?.order?.entity?.amount)
+                : undefined;
+          const expectedCurrency =
+            paymentEntity?.currency ?? payload?.payload?.order?.entity?.currency;
 
-        if (!apptRecord) {
-          return { received: true, note: 'Associated appointment not found.' };
-        }
+          if (
+            paymentRecord.amountPaise !== undefined &&
+            paymentRecord.amountPaise !== null &&
+            expectedAmount !== undefined &&
+            expectedAmount !== paymentRecord.amountPaise
+          ) {
+            this.logger.warn(
+              `Webhook payment amount mismatch for order ${orderId}: expected ${paymentRecord.amountPaise}, got ${expectedAmount}`,
+            );
+            return { received: true, note: 'Payment amount mismatch. Webhook ignored.' };
+          }
 
-        let canConfirm = true;
-        if (apptRecord.status === 'cancelled') {
-          canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
-        }
+          if (
+            paymentRecord.currency &&
+            expectedCurrency &&
+            expectedCurrency !== paymentRecord.currency
+          ) {
+            this.logger.warn(
+              `Webhook payment currency mismatch for order ${orderId}: expected ${paymentRecord.currency}, got ${expectedCurrency}`,
+            );
+            return { received: true, note: 'Payment currency mismatch. Webhook ignored.' };
+          }
+
+          // Step 2: Lock appointment row SECOND
+          const [apptRecord] = await tx
+            .select({
+              id: appointment.id,
+              doctorId: appointment.doctorId,
+              startsAt: appointment.startsAt,
+              endsAt: appointment.endsAt,
+              status: appointment.status,
+            })
+            .from(appointment)
+            .where(eq(appointment.id, paymentRecord.appointmentId))
+            .for('update')
+            .limit(1);
+
+          if (!apptRecord) {
+            return { received: true, note: 'Associated appointment not found.' };
+          }
+
+          let canConfirm = true;
+          if (apptRecord.status === 'cancelled') {
+            canConfirm = await this.hasCapacityForLateCapture(tx, apptRecord);
+          }
 
         if (!canConfirm) {
           await tx
@@ -1008,6 +1111,7 @@ export class PaymentsService {
 
         return { received: true, status: 'captured' };
       });
+    });
 
       if (reassignedPaymentId) {
         void this.reconcileLatePayment(reassignedPaymentId);
@@ -1030,7 +1134,7 @@ export class PaymentsService {
             failureReason,
             updatedAt: new Date(),
           })
-          .where(eq(payment.razorpayOrderId, orderId));
+          .where(and(eq(payment.razorpayOrderId, orderId), eq(payment.status, 'created')));
       }
       return { received: true, status: 'failed' };
     }
@@ -1216,11 +1320,12 @@ export class PaymentsService {
             updatedAt: new Date(),
           })
           .where(
-            or(
-              eq(refund.razorpayRefundId, rzpRefundId),
-              ...(rzpPaymentId
-                ? [and(eq(refund.razorpayPaymentId, rzpPaymentId), eq(refund.status, 'pending'))]
-                : []),
+            and(
+              eq(refund.status, 'pending'),
+              or(
+                eq(refund.razorpayRefundId, rzpRefundId),
+                ...(rzpPaymentId ? [eq(refund.razorpayPaymentId, rzpPaymentId)] : []),
+              ),
             ),
           );
       }

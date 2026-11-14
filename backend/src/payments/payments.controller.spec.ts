@@ -122,5 +122,12 @@ describe('PaymentsController', () => {
         event: 'payment.captured',
       });
     });
+
+    it('rejects webhook if req.rawBody is missing', async () => {
+      const req = {} as any;
+      expect(() => controller.handleWebhook('sig_abc', req, { event: 'payment.captured' }))
+        .toThrow(BadRequestException);
+      expect(mockService.handleWebhook).not.toHaveBeenCalled();
+    });
   });
 });
