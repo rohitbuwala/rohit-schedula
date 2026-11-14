@@ -10,6 +10,7 @@ import { DoctorsModule } from './doctors/doctors.module.js';
 import { PatientsModule } from './patients/patients.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
+import { AssistantModule } from './assistant/assistant.module.js';
 
 export const { ObserveModule, ObserveInstrument } = createObserveModule();
 
@@ -22,6 +23,7 @@ export const { ObserveModule, ObserveInstrument } = createObserveModule();
     AppointmentsModule,
     NotificationsModule,
     PaymentsModule,
+    AssistantModule,
     // Distributed tracing, auto-correlated logs, request/job metrics, error
     // telemetry, alarms, and more — out of the box. Sign up at https://observe.nestjs.com
     ObserveModule.forRoot({
