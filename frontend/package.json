@@ -3,13 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test:auth": "node --experimental-strip-types --test tests/auth-validation.test.mjs",
     "test:booking": "node --experimental-strip-types --test tests/appointment-validation.test.mjs",
-    "test:profile": "node --experimental-strip-types --test tests/patient-profile-validation.test.mjs"
+    "test:profile": "node --experimental-strip-types --test tests/patient-profile-validation.test.mjs",
+    "test:assistant": "node --experimental-strip-types --test tests/assistant-api.test.mjs tests/assistant-speech.test.mjs tests/assistant-wav-recorder.test.mjs tests/assistant-voice-session.test.mjs tests/assistant-audio-playback.test.mjs tests/assistant-booking-draft.test.mjs tests/safe-markdown.test.mjs tests/assistant-ui-logic.test.mjs",
+    "test:assistant:e2e": "node --test tests/e2e/assistant-browser.test.mjs",
+    "test:assistant:payment": "node --experimental-strip-types --test tests/assistant-payment.test.mjs",
+    "test:assistant:history": "node --experimental-strip-types --test tests/assistant-history.test.mjs"
   },
   "dependencies": {
     "better-auth": "1.7.13",
@@ -24,7 +28,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@tailwindcss/turbopack": "^4",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { z } from "zod";
 import {
   AlertTriangle,
@@ -24,7 +24,7 @@ import {
   Timer,
 } from "lucide-react";
 import { backendUrl } from "@/lib/api";
-import { appointmentFormSchema } from "@/lib/appointment-validation";
+import { appointmentFormSchema, isBookingHoldExpired, matchBookingSelection, recoverBookingHold, type BookingSelection } from "@/lib/appointment-validation";
 import { launchRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -72,7 +72,7 @@ interface ActiveHold {
   startsAt: string;
   endsAt: string;
   holdExpiresAt: string;
-  consultationFeeInr: number;
+  consultationFeeInr: number | null;
 }
 
 interface BookingConfirmed {
@@ -120,12 +120,17 @@ const availabilitySchema = z.object({
   ),
 });
 
-export function PatientBooking({ name }: { name?: string }) {
+export function PatientBooking({ name, initialSelection, initialHoldId }: { name?: string; initialSelection?: BookingSelection; initialHoldId?: string }) {
+  const initialSlot = useRef(initialSelection?.startsAt ? initialSelection : undefined);
+  const submittingRef = useRef(false);
+  const paymentInFlight = useRef(false);
+  const [recoveryState, setRecoveryState] = useState<"none" | "loading" | "ready" | "scheduled" | "unavailable">(initialHoldId === undefined ? "none" : "loading");
   const [doctors, setDoctors] = useState<Doctor[]>([]);
-  const [selectedDoctor, setSelectedDoctor] = useState("");
+  const [selectedDoctor, setSelectedDoctor] = useState(initialSelection?.doctorProfileId ?? "");
   const [date, setDate] = useState(() =>
-    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())
+    initialSelection?.date ?? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())
   );
+  const [timezone, setTimezone] = useState("Asia/Kolkata");
   const [slots, setSlots] = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [loadingDoctors, setLoadingDoctors] = useState(true);
@@ -146,6 +151,21 @@ export function PatientBooking({ name }: { name?: string }) {
   const [cancellingHold, setCancellingHold] = useState(false);
 
   const [currentTime] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (initialHoldId === undefined) return;
+    let active = true;
+    void recoverBookingHold(initialHoldId).then((result) => {
+      if (!active) return;
+      if (result.kind !== "hold") { setRecoveryState(result.kind); return; }
+      const hold = result.hold;
+      setActiveHold({ appointmentId: hold.id, doctorProfileId: hold.doctorProfileId, doctorName: hold.doctorName,
+        specialty: hold.specialty, startsAt: hold.startsAt, endsAt: hold.endsAt,
+        holdExpiresAt: hold.holdExpiresAt, consultationFeeInr: hold.consultationFeeInr });
+      setRecoveryState("ready");
+    });
+    return () => { active = false; };
+  }, [initialHoldId]);
 
   // Search & filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -200,8 +220,23 @@ export function PatientBooking({ name }: { name?: string }) {
         if (response.status === 403) throw new Error("Availability is available to patient accounts only.");
         if (!response.ok) throw new Error("Could not load appointment slots. Please try another date.");
         const parsed = availabilitySchema.safeParse(await response.json());
-        if (!parsed.success) throw new Error("Availability returned an unexpected response.");
-        if (active) setSlots(parsed.data.slots);
+        if (!parsed.success || parsed.data.doctorProfileId !== selectedDoctor || parsed.data.date !== date) {
+          throw new Error("Availability returned an unexpected response.");
+        }
+        if (active) {
+          const zone = parsed.data.timezone === "IST" ? "Asia/Kolkata" : parsed.data.timezone;
+          // Validate the returned timezone before using it to display the booking.
+          new Intl.DateTimeFormat("en-IN", { timeZone: zone });
+          setTimezone(zone);
+          setSlots(parsed.data.slots);
+          const selection = initialSlot.current;
+          initialSlot.current = undefined;
+          if (selection?.doctorProfileId === selectedDoctor && selection.date === date) {
+            const slot = matchBookingSelection(selection, parsed.data);
+            setSelectedSlot(slot);
+            if (!slot) setError("The assistant’s suggested slot is no longer available. Choose another slot.");
+          }
+        }
       } catch (cause) {
         if (active) setSlotError(cause instanceof Error ? cause.message : "Could not load appointment slots.");
       } finally {
@@ -244,9 +279,9 @@ export function PatientBooking({ name }: { name?: string }) {
   }
 
   async function triggerPayment(hold: ActiveHold) {
-    if (paymentStep === "checkout_open" || paymentStep === "verifying") return;
+    if (paymentInFlight.current || paymentStep === "checkout_open" || paymentStep === "verifying") return;
 
-    if (new Date(hold.holdExpiresAt).getTime() <= currentTime) {
+    if (isBookingHoldExpired(hold.holdExpiresAt)) {
       setActiveHold(null);
       setPaymentStep("expired");
       setError("This appointment hold has expired. Please select a new slot.");
@@ -254,6 +289,7 @@ export function PatientBooking({ name }: { name?: string }) {
       return;
     }
 
+    paymentInFlight.current = true;
     setPaymentStep("creating_order");
     setPaymentError("");
 
@@ -344,7 +380,20 @@ export function PatientBooking({ name }: { name?: string }) {
         const verifyResult: {
           success: boolean;
           paymentId?: string;
+          lateCapture?: boolean;
         } = await verifyRes.json();
+
+        if (verifyResult.success !== true) {
+          setActiveHold(null);
+          setBookingConfirmed(null);
+          setPaymentStep("failed");
+          setError(verifyResult.lateCapture
+            ? "Your payment was captured, but the appointment could not be confirmed because the hold expired and the slot was taken. A full refund has been queued."
+            : "Your appointment could not be confirmed. Please check your payment status before trying again.");
+          setSelectedSlot(null);
+          setRefreshKey((k) => k + 1);
+          return;
+        }
 
         setActiveHold(null);
         setPaymentStep("success");
@@ -374,7 +423,7 @@ export function PatientBooking({ name }: { name?: string }) {
     } catch (orderErr) {
       setPaymentStep("failed");
       setPaymentError(orderErr instanceof Error ? orderErr.message : "Network error creating payment order.");
-    }
+    } finally { paymentInFlight.current = false; }
   }
 
   async function handleCancelHold() {
@@ -401,6 +450,8 @@ export function PatientBooking({ name }: { name?: string }) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submittingRef.current || activeHold || loadingDoctors || loadingSlots || loadError || slotError ||
+        !selectedDoctorData || !selectedSlot || !slots.includes(selectedSlot)) return;
     setError("");
     setPaymentError("");
     setFieldErrors({});
@@ -419,6 +470,7 @@ export function PatientBooking({ name }: { name?: string }) {
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     setPaymentStep("creating_hold");
 
@@ -463,6 +515,8 @@ export function PatientBooking({ name }: { name?: string }) {
         if (response.status === 403) throw new Error("Only patient accounts can book appointments.");
         if (response.status === 404) throw new Error(serverMessage || "The selected doctor could not be found.");
         if (response.status === 409) {
+          setSelectedSlot(null);
+          setRefreshKey((value) => value + 1);
           throw new Error(serverMessage || "The selected time slot is already booked or on hold. Please choose another slot.");
         }
         throw new Error(
@@ -496,6 +550,7 @@ export function PatientBooking({ name }: { name?: string }) {
       setError(cause instanceof Error ? cause.message : "Booking failed. Please try again.");
       setPaymentStep("idle");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -524,17 +579,12 @@ export function PatientBooking({ name }: { name?: string }) {
   const selectedDoctorData = doctors.find((d) => d.id === selectedDoctor) ?? null;
 
   function formatSlotDisplay(startsAt: string, endsAt: string) {
-    const start = new Intl.DateTimeFormat("en-IN", {
+    const formatter = new Intl.DateTimeFormat("en-IN", {
       hour: "numeric",
       minute: "2-digit",
-      timeZone: "Asia/Kolkata",
-    }).format(new Date(startsAt));
-    const end = new Intl.DateTimeFormat("en-IN", {
-      hour: "numeric",
-      minute: "2-digit",
-      timeZone: "Asia/Kolkata",
-    }).format(new Date(endsAt));
-    return `${start} – ${end} IST`;
+      timeZone: timezone,
+    });
+    return `${formatter.formatRange(new Date(startsAt), new Date(endsAt))} ${timezone === "Asia/Kolkata" ? "IST" : timezone}`;
   }
 
   function formatReviewDate(dateStr: string) {
@@ -561,8 +611,15 @@ export function PatientBooking({ name }: { name?: string }) {
       day: "numeric",
       month: "long",
       year: "numeric",
-      timeZone: "Asia/Kolkata",
+      timeZone: timezone,
     }).format(new Date(startsAt));
+  }
+
+  if (recoveryState === "loading" || recoveryState === "unavailable" || recoveryState === "scheduled") {
+    return <div className="mx-auto max-w-3xl space-y-3 p-6" role="status">
+      <p>{recoveryState === "loading" ? "Checking your appointment hold…" : recoveryState === "scheduled" ? "This appointment is already scheduled. Check your appointments for its status." : "This hold is unavailable, expired, or cannot be accessed. Check your appointments before booking again."}</p>
+      {recoveryState !== "loading" && <Link href="/patient/dashboard" className="font-semibold text-teal-800 underline">View my appointments</Link>}
+    </div>;
   }
 
   return (
@@ -791,8 +848,10 @@ export function PatientBooking({ name }: { name?: string }) {
                 <div
                   key={doctor.id}
                   onClick={() => {
-                    if (activeHold) return; // Prevent changing doctor during active hold
+                    if (activeHold || submittingRef.current || doctor.id === selectedDoctor) return;
                     setSelectedDoctor(doctor.id);
+                    setSelectedSlot(null);
+                    setSlots([]);
                     setError("");
                     setPaymentError("");
                     setFieldErrors({});
@@ -906,7 +965,7 @@ export function PatientBooking({ name }: { name?: string }) {
                   </p>
                   <div className="flex justify-between border-t border-slate-100 pt-1.5 font-bold">
                     <span>Consultation Fee:</span>
-                    <span className="text-teal-900">₹{activeHold.consultationFeeInr}</span>
+                    <span className="text-teal-900">{activeHold.consultationFeeInr === null ? "Unavailable" : `₹${activeHold.consultationFeeInr}`}</span>
                   </div>
                 </div>
 
@@ -964,7 +1023,7 @@ export function PatientBooking({ name }: { name?: string }) {
                       </>
                     ) : (
                       <>
-                        <CreditCard className="h-4 w-4 mr-2" /> Complete Payment (₹{activeHold.consultationFeeInr})
+                        <CreditCard className="h-4 w-4 mr-2" /> Complete Payment{activeHold.consultationFeeInr === null ? "" : ` (₹${activeHold.consultationFeeInr})`}
                       </>
                     )}
                   </Button>
@@ -1031,16 +1090,16 @@ export function PatientBooking({ name }: { name?: string }) {
                 </div>
               )}
 
-              <form onSubmit={submit} noValidate className="space-y-5">
+              <form id="booking-form" onSubmit={submit} noValidate className="scroll-mt-20 space-y-5">
                 {/* Date Input */}
                 <div className="space-y-1.5">
                   <label htmlFor="bookingDate" className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                    Consultation Date (IST)
+                    Consultation Date ({timezone === "Asia/Kolkata" ? "IST" : timezone})
                   </label>
                   <Input
                     id="bookingDate"
                     type="date"
-                    min={new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date())}
+                    min={new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(new Date())}
                     value={date}
                     onChange={(event) => {
                       setDate(event.target.value);
@@ -1050,7 +1109,7 @@ export function PatientBooking({ name }: { name?: string }) {
                       setError("");
                       setPaymentError("");
                     }}
-                    disabled={!selectedDoctor || loadingDoctors || Boolean(loadError) || Boolean(activeHold)}
+                    disabled={!selectedDoctor || loadingDoctors || Boolean(loadError) || submitting || Boolean(activeHold)}
                     className="w-full bg-white text-xs h-10"
                   />
                   <p className="text-[11px] text-slate-400">
@@ -1085,9 +1144,9 @@ export function PatientBooking({ name }: { name?: string }) {
 
                 {/* Slots Grid */}
                 {availableSlots.length > 0 && (
-                  <fieldset disabled={loadingSlots || Boolean(activeHold)} className="space-y-2">
+                  <fieldset disabled={loadingSlots || submitting || Boolean(activeHold)} className="space-y-2">
                     <legend className="text-xs font-bold uppercase tracking-wider text-slate-700">
-                      Available Consultation Windows (IST)
+                      Available Consultation Windows
                     </legend>
                     <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
                       {availableSlots.map((slot) => {
@@ -1196,7 +1255,7 @@ export function PatientBooking({ name }: { name?: string }) {
                     </>
                   ) : (
                     <>
-                      <CreditCard className="h-4 w-4 mr-2" /> Proceed to Payment (₹{selectedDoctorData?.consultationFeeInr?.toLocaleString("en-IN") ?? 500})
+                      <CreditCard className="h-4 w-4 mr-2" /> Confirm and pay (₹{selectedDoctorData?.consultationFeeInr?.toLocaleString("en-IN") ?? 500})
                     </>
                   )}
                 </Button>
