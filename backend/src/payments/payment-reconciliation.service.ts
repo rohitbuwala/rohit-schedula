@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { and, eq, isNotNull, lt, lte, or } from 'drizzle-orm';
 import { db } from '../db/database.js';
+import { classifyDatabaseFailure } from '../db/database-failure.js';
 import { appointment, payment, refund, user } from '../db/schema.js';
 import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox.service.js';
 import { RAZORPAY_TOKEN, type RazorpayInstance } from './razorpay.provider.js';
@@ -102,7 +103,9 @@ export class PaymentReconciliationService implements OnModuleInit {
     try {
       await this.reconcileInconsistentPayments();
     } catch (err) {
-      this.logger.error('Startup payment reconciliation failed:', err);
+      this.logger.error(
+        `Startup payment reconciliation failed. Next attempt at the scheduled sweep. Database diagnostic: ${classifyDatabaseFailure(err).diagnostic}`,
+      );
     }
   }
 
@@ -117,7 +120,9 @@ export class PaymentReconciliationService implements OnModuleInit {
         this.logger.log(`Successfully reconciled ${reconciledCount} payment(s)/refund(s).`);
       }
     } catch (err) {
-      this.logger.error('Error during scheduled payment reconciliation:', err);
+      this.logger.error(
+        `Scheduled payment reconciliation failed. Database diagnostic: ${classifyDatabaseFailure(err).diagnostic}`,
+      );
     }
   }
 

@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { AppointmentsService, resolvePaymentStatusDisplay } from './appointments.service.js';
 import { AppointmentExpiryService } from './appointment-expiry.service.js';
 import { PaymentReconciliationService } from '../payments/payment-reconciliation.service.js';
@@ -69,6 +69,25 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
   });
 
   describe('Immediate Refund Triggering', () => {
+    it('does not cancel or refund an appointment owned by another patient', async () => {
+      const select = vi.fn().mockReturnThis();
+      const update = vi.fn();
+      const tx = {
+        select, update,
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        for: vi.fn().mockReturnThis(),
+        limit: vi.fn()
+          .mockResolvedValueOnce([{ id: paymentId, status: 'captured', amountPaise: 50000 }])
+          .mockResolvedValueOnce([{ id: appointmentId, patientId: 'another-patient', doctorId, status: 'scheduled' }]),
+      };
+      vi.mocked(db.transaction).mockImplementationOnce(async (callback) => callback(tx as never));
+      await expect(appointmentsService.cancel(appointmentId, patientActor, 'Appointment cancelled by patient: Other'))
+        .rejects.toBeInstanceOf(NotFoundException);
+      expect(update).not.toHaveBeenCalled();
+      expect(mockPayments.refundPayment).not.toHaveBeenCalled();
+    });
+
     it('1. triggers an immediate full refund when a paid scheduled appointment is cancelled by patient', async () => {
       const mockApptRecord = {
         id: appointmentId,
@@ -138,7 +157,7 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
 
       (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
 
-      const result = await appointmentsService.cancel(appointmentId, patientActor);
+      const result = await appointmentsService.cancel(appointmentId, patientActor, 'Appointment cancelled by patient: Schedule conflict');
 
       expect(result.status).toBe('cancelled');
       expect(result.refund).toBeDefined();
@@ -148,7 +167,7 @@ describe('Appointment Cancellation & Immediate Refund Integration', () => {
         'system',
         paymentId,
         expect.objectContaining({
-          reason: 'Appointment cancelled by patient',
+          reason: 'Appointment cancelled by patient: Schedule conflict',
           amountPaise: 50000,
         }),
       );

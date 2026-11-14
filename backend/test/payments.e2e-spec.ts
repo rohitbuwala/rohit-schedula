@@ -219,7 +219,15 @@ describe('Payments & Slot Booking E2E Integration Audit', () => {
       })
       .compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ bodyParser: false });
+    const express = (await import('express')).default;
+    app.use(
+      express.json({
+        verify: (req: any, _res: any, buf: Buffer) => {
+          req.rawBody = buf;
+        },
+      }),
+    );
     await app.init();
     expiryService = app.get(AppointmentExpiryService);
     reconciliationService = app.get(PaymentReconciliationService);
