@@ -18,6 +18,7 @@ export default async function DoctorDashboard() {
   if (!session) redirect("/login");
 
   if (session.user.role === "admin") redirect("/admin");
+  if (session.user.role === "staff") redirect("/staff/dashboard");
 
   if (session.user.role === "doctor") {
     const showAssistant = await canShowAssistant("doctor");

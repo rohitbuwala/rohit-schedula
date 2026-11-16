@@ -4,14 +4,17 @@ import { useState } from "react";
 import { CreditCard, UserCheck } from "lucide-react";
 import { AdminDoctorApplications } from "@/components/admin-doctor-applications";
 import { AdminPaymentsRefunds } from "@/components/admin-payments-refunds";
+import { AdminStaffAssignments } from "@/components/admin-staff-assignments";
 
 export function AdminDashboard() {
-  const [activeSection, setActiveSection] = useState<"applications" | "payments">("applications");
+  const [activeSection, setActiveSection] = useState<"applications" | "payments" | "staff">("applications");
 
   return (
     <div className="min-w-0 space-y-6">
       {/* Top Admin Section Switcher */}
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-4">
+        <button type="button" onClick={() => setActiveSection("staff")} aria-pressed={activeSection === "staff"}
+          className={`rounded-xl px-4 py-2 text-xs font-semibold transition sm:text-sm ${activeSection === "staff" ? "bg-teal-700 text-white shadow-xs" : "text-slate-600 hover:bg-slate-100"}`}>Staff Access</button>
         <button
           type="button"
           onClick={() => setActiveSection("applications")}
@@ -39,7 +42,7 @@ export function AdminDashboard() {
       </div>
 
       {/* Render Active Section */}
-      {activeSection === "applications" ? (
+      {activeSection === "staff" ? <AdminStaffAssignments /> : activeSection === "applications" ? (
         <AdminDoctorApplications />
       ) : (
         <AdminPaymentsRefunds />

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { parseDoctorApplicationResponseBody } from "@/lib/doctor-application-response";
 
 const sessionSchema = z.object({
-  user: z.object({ id: z.string(), name: z.string(), email: z.email(), role: z.enum(["patient", "doctor", "admin"]).optional() }),
+  user: z.object({ id: z.string(), name: z.string(), email: z.email(), role: z.enum(["patient", "doctor", "admin", "staff"]).optional() }),
   session: z.object({ id: z.string() }),
 }).passthrough();
 
@@ -43,6 +43,7 @@ export async function canShowAssistant(role: "patient" | "doctor") {
 
 export function dashboardPath(role?: string) {
   if (role === "admin") return "/admin";
+  if (role === "staff") return "/staff/dashboard";
   return role === "doctor" ? "/doctor/dashboard" : "/patient/dashboard";
 }
 
@@ -50,6 +51,7 @@ export async function getPostLoginRedirect(cookie?: string | null): Promise<stri
   const session = await getVerifiedSession();
   if (!session) return "/login";
   if (session.user.role === "admin") return "/admin";
+  if (session.user.role === "staff") return "/staff/dashboard";
   if (session.user.role === "doctor") return "/doctor/dashboard";
 
   // For patient accounts, check if they have a doctor application pending review
