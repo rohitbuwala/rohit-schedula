@@ -3,6 +3,7 @@ import { appointmentRescheduleSchema } from '../appointments/appointment-resched
 
 export const chatRequestSchema = z.object({
   message: z.string().trim().min(1).max(1000),
+  language: z.enum(['en', 'hi']).optional(),
 }).strict();
 
 export const assistantCancellationSchema = z.object({
@@ -28,6 +29,7 @@ const patientTools = {
 };
 
 const doctorTools = {
+  upcoming_appointments: "List the doctor's already booked upcoming appointments and patient names. Not free or available slots.",
   reschedule_suggestions: "Suggest alternative available slots for a selected appointment without changing it.",
   next_available_slot: "Find the doctor's earliest available appointment slot within a search horizon.",
   today_appointments: "List today's appointments with references for opening details. Never use for a different date.",

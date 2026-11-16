@@ -8,6 +8,7 @@ const slot = z.object({
 }).refine(({ startsAt, endsAt }) => Date.parse(startsAt) < Date.parse(endsAt));
 const appointmentStatus = z.enum(["pending_payment", "scheduled", "completed", "cancelled"]);
 const appointment = slot.safeExtend({ id: z.uuid(), status: appointmentStatus });
+const doctorAppointment = appointment.safeExtend({ patient: z.object({ name: z.string() }).optional() });
 const doctor = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -77,10 +78,15 @@ export const assistantResponseSchema = z.discriminatedUnion("tool", [
     ...availabilityFields, slots: z.array(slot).max(3),
   }) }),
   z.object({ tool: z.literal("today_appointments"), reply, data: z.object({
-    date: z.iso.date(), timezone, appointments: z.array(appointment).max(50), hasMore,
+    date: z.iso.date(), timezone, appointments: z.array(doctorAppointment).max(50), hasMore,
+  }) }),
+  z.object({ tool: z.literal("upcoming_appointments"), reply, data: z.object({
+    timezone, appointments: z.array(doctorAppointment).max(50), hasMore,
   }) }),
   z.object({ tool: z.literal("doctor_appointments_by_date"), reply, data: z.object({
-    date: z.iso.date(), timezone, appointments: z.array(slot.safeExtend({ status: appointmentStatus })).max(50), hasMore,
+    date: z.iso.date(), timezone, appointments: z.array(slot.safeExtend({
+      id: z.uuid().optional(), status: appointmentStatus, patient: z.object({ name: z.string() }).optional(),
+    })).max(50), hasMore,
   }) }),
   z.object({ tool: z.literal("next_available_slot"), reply, data: z.object({
     timezone, horizonDays: z.number().int().min(1).max(90), slot: slot.nullable(),
@@ -95,7 +101,7 @@ export const assistantResponseSchema = z.discriminatedUnion("tool", [
   z.object({ tool: z.literal("schedule_conflicts"), reply, data: slot.safeExtend({
     timezone, conflicts: z.array(slot.safeExtend({ id: z.uuid() })).max(50), hasMore,
   }) }),
-  z.object({ tool: z.literal("appointment_details"), reply, data: appointment.safeExtend({ timezone }) }),
+  z.object({ tool: z.literal("appointment_details"), reply, data: doctorAppointment.safeExtend({ timezone }) }),
   z.object({ tool: z.literal("view_schedule"), reply, data: z.object({
     timezone, activeDays: z.array(z.number().int().min(0).max(6)), startHour: hour, endHour: hour,
     slotDurationMinutes: z.number().positive(), breakStart: breakTime, breakEnd: breakTime,
@@ -204,7 +210,7 @@ export async function confirmAssistantCancellation(appointmentId: string, reason
   }
 }
 
-export async function sendAssistantMessage(message: string, signal?: AbortSignal): Promise<AssistantResponse> {
+export async function sendAssistantMessage(message: string, signal?: AbortSignal, language?: "en" | "hi"): Promise<AssistantResponse> {
   const input = assistantMessageSchema.safeParse(message);
   if (!input.success) throw new AssistantApiError(messages[400], 400);
   const response = await fetch("/api/assistant/chat", {
@@ -212,7 +218,7 @@ export async function sendAssistantMessage(message: string, signal?: AbortSignal
     credentials: "include",
     cache: "no-store",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: input.data }),
+    body: JSON.stringify({ message: input.data, ...(language ? { language } : {}) }),
     signal,
   });
   if (!response.ok) {

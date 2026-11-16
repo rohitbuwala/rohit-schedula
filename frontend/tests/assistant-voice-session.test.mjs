@@ -9,6 +9,22 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+it("honours stop pressed while microphone permission/setup is still pending", async () => {
+  const setup = deferred();
+  const recording = deferred();
+  let stops = 0, transcript = '';
+  const session = createAssistantVoiceSession({
+    start: () => setup.promise,
+    transcribe: async () => 'मेरी अगली अपॉइंटमेंट',
+    onState() {}, onTranscript: text => { transcript = text; }, onError(error) { throw error; }, onEnd() {},
+  });
+  session.stop(); session.stop();
+  setup.resolve({ result: recording.promise, stop: async () => { stops++; recording.resolve(new Blob(['audio'])); return recording.promise; }, cancel() {} });
+  await session.done;
+  assert.equal(stops, 1);
+  assert.equal(transcript, 'मेरी अगली अपॉइंटमेंट');
+});
+
 it("waits for microphone cleanup before starting live voice, and respects cancellation", async () => {
   const cleanup = deferred();
   let starts = 0;

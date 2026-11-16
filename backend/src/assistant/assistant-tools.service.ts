@@ -35,6 +35,11 @@ function clarification(reply: string) {
   return { tool: 'clarify', reply, data: null } as const;
 }
 
+function doctorAppointmentSummary(row: { id: string; startsAt: Date; endsAt: Date; status: string; patient?: { name: string } }) {
+  return { id: row.id, startsAt: row.startsAt, endsAt: row.endsAt, status: row.status,
+    ...(row.patient ? { patient: { name: row.patient.name } } : {}) };
+}
+
 function doctorDateFormatter(timezone: string) {
   try {
     return new Intl.DateTimeFormat('en-CA', {
@@ -173,12 +178,18 @@ export class AssistantToolsService {
           data: { ...result, horizonDays },
         };
       }
+      case 'upcoming_appointments': {
+        const { timezone } = await this.doctorDay(actor.id);
+        const rows = await this.appointments.listMineReadOnly(actor, { filter: 'upcoming' });
+        return { tool, reply: rows.length ? 'Here are your upcoming appointments.' : 'You have no upcoming appointments.',
+          data: { timezone, appointments: rows.slice(0, 50).map(doctorAppointmentSummary), hasMore: rows.length > 50 } };
+      }
       case 'today_appointments': {
         if (!/\btomorrow\b/i.test(message) && !references(message, datePattern).length) {
           const { date, timezone } = await this.doctorDay(actor.id);
           const rows = await this.appointments.listMineReadOnly(actor, { date, timezone });
           return { tool, reply: rows.length ? "Here are today's appointments." : 'You have no appointments today.',
-            data: { date, timezone, appointments: rows.slice(0, 50), hasMore: rows.length > 50 } };
+            data: { date, timezone, appointments: rows.slice(0, 50).map(doctorAppointmentSummary), hasMore: rows.length > 50 } };
         }
         return this.appointmentsByDate(actor, message);
       }
@@ -238,7 +249,7 @@ export class AssistantToolsService {
         const appointment = await this.appointments.getMineReadOnly(ids[0], actor);
         const schedule = await this.schedules.getSchedule(actor.id);
         const { timeZone: timezone } = doctorDateFormatter(schedule.timezone).resolvedOptions();
-        return { tool, reply: 'Here are the appointment details.', data: { ...appointment, timezone } };
+        return { tool, reply: 'Here are the appointment details.', data: { ...doctorAppointmentSummary(appointment), timezone } };
       }
       case 'view_schedule': {
         const { timezone, activeDays, startHour, endHour, slotDurationMinutes, breakStart, breakEnd, leaves } =
@@ -265,7 +276,7 @@ export class AssistantToolsService {
     return {
       tool: 'doctor_appointments_by_date',
       reply: rows.length ? 'Here are your appointments for that date.' : 'You have no appointments on that date.',
-      data: { ...day, appointments: rows.slice(0, 50).map(({ startsAt, endsAt, status }) => ({ startsAt, endsAt, status })),
+      data: { ...day, appointments: rows.slice(0, 50).map(doctorAppointmentSummary),
         hasMore: rows.length > 50 },
     } as const;
   }

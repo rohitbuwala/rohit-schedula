@@ -8,6 +8,18 @@ const appointment = { id, ...slot, status: "scheduled" };
 const doctor = { id, name: "Dr. Test", specialty: "Cardiology" };
 const zone = { date: "2026-11-12", timezone: "Asia/Kolkata" };
 
+it("sends the selected reply language and retains doctor appointment card names", async (t) => {
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body), { message: 'My next appointment', language: 'hi' });
+    return Response.json({ tool: 'upcoming_appointments', reply: 'ये आपकी अपॉइंटमेंट हैं।', data: {
+      timezone: zone.timezone, appointments: [{ ...appointment, patient: { name: 'Test Patient' } }], hasMore: false,
+    } });
+  });
+  const result = await sendAssistantMessage('My next appointment', undefined, 'hi');
+  assert.equal(result.data.appointments[0].patient.name, 'Test Patient');
+  assert.equal(result.data.appointments[0].startsAt, slot.startsAt);
+});
+
 it("requests authenticated synthesized audio and rejects provider errors", async (t) => {
   const mock = t.mock.method(globalThis, "fetch", async (url, options) => {
     assert.equal(url, "/api/assistant/voice/synthesize");

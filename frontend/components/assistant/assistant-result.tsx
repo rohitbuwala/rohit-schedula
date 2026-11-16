@@ -326,14 +326,17 @@ export function AssistantResult({
         </div>
       );
 
+    case "upcoming_appointments":
+    case "doctor_appointments_by_date":
     case "today_appointments": {
       const zone = data.timezone;
       return (
         <div className="space-y-2.5">
-          {data.appointments.length > 0 && <p className="text-xs text-slate-500">{zone}</p>}
+          <p className="text-xs font-medium text-slate-600">Booked appointments · {"date" in data ? `${data.date} · ` : ""}{zone}</p>
           <ul className="space-y-2">
-            {data.appointments.map((item) => (
-              <li key={item.id} className="space-y-2 rounded-xl border border-slate-200 bg-white p-3.5 shadow-xs">
+            {data.appointments.map((item, index) => (
+              <li key={item.id ?? `${item.startsAt}-${index}`} className="space-y-2 rounded-xl border border-slate-200 bg-white p-3.5 shadow-xs">
+                <p className="font-semibold text-slate-900">{item.patient?.name ?? "Patient name unavailable"}</p>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
                     <Clock className="size-3.5 text-slate-500 shrink-0" />
@@ -341,18 +344,18 @@ export function AssistantResult({
                   </div>
                   <StatusBadge status={item.status} />
                 </div>
-                <div className="pt-1 flex justify-end">
+                {item.id && <div className="pt-1 flex justify-end">
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
                     disabled={busy}
                     aria-label={`View details for ${appointmentTimeRange(item.startsAt, item.endsAt, zone)}`}
-                    onClick={() => onAppointmentDetails(item.id)}
+                    onClick={() => { if (item.id) onAppointmentDetails(item.id); }}
                   >
                     View details
                   </Button>
-                </div>
+                </div>}
               </li>
             ))}
           </ul>
@@ -361,32 +364,11 @@ export function AssistantResult({
       );
     }
 
-    case "doctor_appointments_by_date":
-      return (
-        <div className="space-y-2.5">
-          <p className="text-xs text-slate-500 font-medium">
-            {data.date} ({data.timezone})
-          </p>
-          <ul className="space-y-2">
-            {data.appointments.map((item, index) => (
-              <li key={`${item.startsAt}-${index}`} className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-3 shadow-xs">
-                <div className="flex items-center gap-1.5 text-xs text-slate-800">
-                  <Clock className="size-3.5 text-slate-500 shrink-0" />
-                  <span>{appointmentTimeRange(item.startsAt, item.endsAt, data.timezone)}</span>
-                </div>
-                <StatusBadge status={item.status} />
-              </li>
-            ))}
-          </ul>
-          <MoreResults show={data.hasMore} />
-        </div>
-      );
-
     case "next_available_slot":
       return data.slot ? (
         <div className="inline-flex items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-medium text-teal-950">
           <Clock className="size-3.5 text-teal-700 shrink-0" />
-          <span>{appointmentTimeRange(data.slot.startsAt, data.slot.endsAt, data.timezone)} ({data.timezone})</span>
+          <span>Next free slot · {appointmentTimeRange(data.slot.startsAt, data.slot.endsAt, data.timezone)} ({data.timezone})</span>
         </div>
       ) : null;
 
@@ -460,6 +442,7 @@ export function AssistantResult({
     case "appointment_details":
       return (
         <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-3.5 shadow-xs">
+          <p className="font-semibold text-slate-900">{data.patient?.name ?? "Patient name unavailable"}</p>
           <div className="flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-slate-800">
               {appointmentTimeRange(data.startsAt, data.endsAt, data.timezone)} ({data.timezone})

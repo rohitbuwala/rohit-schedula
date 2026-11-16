@@ -9,6 +9,7 @@ import { ASSISTANT_PROVIDER, type AssistantProvider } from './assistant-provider
 import { allowedTools, toolSelectionSchema, type assistantRescheduleSchema, type AssistantCancellationReason, type AssistantTool } from './assistant.schema.js';
 import { AssistantToolsService } from './assistant-tools.service.js';
 import { detectBookingIntent, extractBookingDetails } from './booking-intent.js';
+import { localizeAssistantReply, normalizeSchedulingMessage, type AssistantLanguage } from './assistant-language.js';
 
 // Only these fixed scheduling terms can leave Medrella. Names, dates, IDs and
 // other free text are resolved locally after tool selection.
@@ -38,9 +39,10 @@ export class AssistantService {
     private readonly profiles: DoctorProfilesService,
   ) {}
 
-  async chat(actor: AuthenticatedUser, message: string) {
+  async chat(actor: AuthenticatedUser, message: string, language?: AssistantLanguage) {
     try {
-      return await this.handleChat(actor, message);
+      const result = await this.handleChat(actor, normalizeSchedulingMessage(message), /\p{Script=Devanagari}/u.test(message));
+      return localizeAssistantReply(result, language ?? (/\p{Script=Devanagari}/u.test(message) ? 'hi' : 'en'));
     } catch (error) {
       if (error instanceof HttpException) throw error;
       // Database errors can embed SQL parameters and nested causes.
@@ -73,7 +75,7 @@ export class AssistantService {
     }
   }
 
-  private async handleChat(actor: AuthenticatedUser, message: string) {
+  private async handleChat(actor: AuthenticatedUser, message: string, hindi = false) {
     if (actor.role !== 'patient' && actor.role !== 'doctor') throw new ForbiddenException();
     await this.assertEligible(actor);
 
@@ -118,6 +120,22 @@ export class AssistantService {
       } as const;
     }
     if (writeRequest.test(actionText)) return clarify;
+    // A booked appointment is not an available slot. Resolve this locally so
+    // mixed Hindi/English questions cannot lose that distinction at the provider.
+    if ((hindi || /\b(?:next|upcoming|bookings?|patients?|when|where)\b/i.test(message)) &&
+        /\b(?:appointments?|bookings?|patients?)\b/i.test(message) &&
+        /\b(?:my|next|upcoming|when|who|list|show|today|tomorrow)\b/i.test(message) &&
+        !/\b(?:available|free|open)\b/i.test(message) &&
+        !/\b(?:week|month|year|yesterday|past|previous)\b/i.test(message) &&
+        !/\b(?:statistics|stats|count|conflicts?|suggestions?|details?)\b/i.test(message) &&
+        !/\b[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}\b/i.test(message)) {
+      if (actor.role === 'doctor') {
+        return this.tools.execute(/\b(?:today|tomorrow|\d{4}-\d{2}-\d{2})\b/i.test(message)
+          ? 'doctor_appointments_by_date' : 'upcoming_appointments', actor, message);
+      }
+      return this.tools.execute('list_appointments', actor,
+        /\bnext\b/i.test(message) ? `upcoming ${message}` : message);
+    }
     if (actor.role === 'patient' && /\b(?:my|our)\s+(?:(?:upcoming|past|previous|confirmed|all)\s+)?bookings?\b/i.test(message)) {
       return this.tools.execute('list_appointments', actor, message);
     }

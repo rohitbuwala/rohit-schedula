@@ -20,7 +20,9 @@ export class AssistantController {
   chat(@CurrentUser() actor: AuthenticatedUser, @Body() body: unknown) {
     const parsed = chatRequestSchema.safeParse(body);
     if (!parsed.success) throw new BadRequestException('Provide a message between 1 and 1000 characters.');
-    return this.assistant.chat(actor, parsed.data.message);
+    return parsed.data.language
+      ? this.assistant.chat(actor, parsed.data.message, parsed.data.language)
+      : this.assistant.chat(actor, parsed.data.message);
   }
 
   @Patch('appointments/cancel')

@@ -16,7 +16,7 @@ import { AssistantApiError, assistantMessageSchema, sendAssistantMessage, synthe
 import { AssistantResult } from "./assistant-result";
 import { SafeMarkdown } from "./safe-markdown";
 import { formatSlotRange, slotDurationLabel, groupSlotsByPeriod } from "./assistant-ui-helpers";
-import { appendSpeechTranscript, speechErrorMessage } from "./assistant-speech";
+import { appendSpeechTranscript, assistantReplyLanguage, assistantSpokenReply, speechErrorMessage } from "./assistant-speech";
 import { startAssistantWavRecorder } from "./assistant-wav-recorder";
 import { createAssistantVoiceSession, handoffAssistantRecorder, startAssistantVoiceWhenReady } from "./assistant-voice-session";
 import { playAssistantAudio } from "./assistant-audio-playback";
@@ -114,7 +114,8 @@ export function AssistantPanel({ role, patientId }: { role: "patient" | "doctor"
   const [voiceError, setVoiceError] = useState("");
   const [playbackIndex, setPlaybackIndex] = useState<number | null>(null);
   const [playbackStarting, setPlaybackStarting] = useState(false);
-  const [playbackLanguage, setPlaybackLanguage] = useState<"en" | "hi">("en");
+  const [replyLanguage, setReplyLanguage] = useState<"auto" | "en" | "hi">("auto");
+  const languagePreference = useRef<"auto" | "en" | "hi">("auto");
   const [playbackNotice, setPlaybackNotice] = useState("");
   const blocked = error?.status === 401 || error?.status === 403;
   const draftHint = draft.startsWith("Check availability with ")
@@ -256,14 +257,14 @@ export function AssistantPanel({ role, patientId }: { role: "patient" | "doctor"
     turnCount.current = index + 1;
     setTurns((previous) => [...previous.slice(-(MAX_HISTORY_TURNS - 1)), { message: parsed.data, createdAt }]);
     try {
-      const result = await sendAssistantMessage(parsed.data, controller.signal);
+      const result = await sendAssistantMessage(parsed.data, controller.signal, assistantReplyLanguage(parsed.data, languagePreference.current));
       if (!controller.signal.aborted) {
         setTurns((previous) => [...previous.slice(0, -1), { message: parsed.data, createdAt, result }]);
         if (result.tool === "start_booking") {
           const prefill = result.data;
           void startBooking(prefill?.doctorProfileId, prefill?.date, prefill?.time, prefill?.specialty);
         }
-        if (voiceTurn !== undefined && continuous.current && voiceTurn === generation.current) void playReply(result.reply, index, voiceTurn);
+        if (voiceTurn !== undefined && continuous.current && voiceTurn === generation.current) void playReply(assistantSpokenReply(result), index, voiceTurn);
       }
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -543,13 +544,14 @@ export function AssistantPanel({ role, patientId }: { role: "patient" | "doctor"
       }
       if (voiceCleanup.current) await voiceCleanup.current;
       if (controller.signal.aborted || request !== playbackRequest.current) return;
-      const audio = await synthesizeAssistantAudio(text, playbackLanguage, controller.signal);
+      const audio = await synthesizeAssistantAudio(text, assistantReplyLanguage(text, "auto"), controller.signal);
       if (controller.signal.aborted || request !== playbackRequest.current) return;
       const session = playAssistantAudio(audio, {
         onEnd: () => {
           if (request !== playbackRequest.current) return;
           stopMonitor();
           playback.current = null; setPlaybackIndex(null);
+          playbackAbort.current = null; setPlaybackStarting(false);
           if (continuous.current && voiceTurn === generation.current) startVoiceInput();
         },
         onError: () => {
@@ -858,18 +860,13 @@ export function AssistantPanel({ role, patientId }: { role: "patient" | "doctor"
                     )}
 
                     <div className="flex flex-wrap items-center gap-2 border-t border-slate-200/60 pt-2">
-                      <label htmlFor={`${id}-voice-${index}`} className="text-xs font-medium text-slate-600">Voice</label>
-                      <select id={`${id}-voice-${index}`} value={playbackLanguage}
-                        onChange={(event) => setPlaybackLanguage(event.target.value as "en" | "hi")}
-                        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs">
-                        <option value="en">English</option><option value="hi">Hindi</option>
-                      </select>
+                      <span className="text-xs font-medium text-slate-600">{assistantReplyLanguage(turn.result.reply, "auto") === "hi" ? "हिन्दी" : "English"}</span>
                       {playbackIndex === index ? (
                         <button type="button" onClick={() => { if (continuous.current) disableContinuous(); stopPlayback(); }} className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-700">
                           <Square aria-hidden="true" className="size-3" /> Stop speaking
                         </button>
                       ) : (
-                        <button type="button" disabled={playbackStarting} onClick={() => void playReply(turn.result!.reply, index)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-700 disabled:opacity-50">
+                        <button type="button" disabled={playbackStarting} onClick={() => void playReply(assistantSpokenReply(turn.result!), index)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-700 disabled:opacity-50">
                           <Volume2 aria-hidden="true" className="size-4" /> Listen
                         </button>
                       )}
@@ -1224,6 +1221,14 @@ export function AssistantPanel({ role, patientId }: { role: "patient" | "doctor"
           )}
         </div>
           <form onSubmit={handleSubmit} className="shrink-0 space-y-1.5 border-t border-slate-200 bg-white p-4 sm:px-5">
+            <label className="flex items-center justify-between gap-2 text-xs text-slate-600">
+              Language for new replies & voice
+              <select aria-label="Reply and voice language" value={replyLanguage}
+                onChange={(event) => { const language = event.target.value as "auto" | "en" | "hi"; languagePreference.current = language; setReplyLanguage(language); }}
+                className="rounded border border-slate-300 bg-white px-2 py-1">
+                <option value="auto">Auto · English / हिन्दी</option><option value="en">English</option><option value="hi">हिन्दी</option>
+              </select>
+            </label>
             {continuousEnabled && <p role="status" className="flex items-center gap-2 text-xs text-teal-800"><span className="size-2 animate-pulse rounded-full bg-teal-500" />{playbackIndex !== null ? "Speaking… listening resumes after the reply." : busy ? "Thinking…" : voiceState === "transcribing" ? "Understanding your words…" : "Listening… pause to send automatically."}</p>}
             {continuousEnabled && <div>
               <button type="button" role="switch" aria-checked={bargeEnabled} onClick={toggleBarge}

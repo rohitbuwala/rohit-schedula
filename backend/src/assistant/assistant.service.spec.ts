@@ -58,6 +58,52 @@ describe('assistant orchestration and read tools', () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'मेरी next booking कब की है?',
+    'मेरी next appointment कब है और patient कौन-कौन है?',
+    'मेरी अगली अपॉइंटमेंट कब है?',
+    'Where is my upcoming appointment?',
+  ])('looks up booked appointments instead of free slots for %s', async (message) => {
+    const patient = { name: 'Test Patient', email: 'not-for-the-card@example.test' };
+    const startsAt = new Date('2026-11-16T04:30:00Z');
+    const endsAt = new Date('2026-11-16T04:45:00Z');
+    listMineReadOnly.mockResolvedValue([{ id, startsAt, endsAt, status: 'scheduled', patient, patientId: 'private' }]);
+    selectTool.mockResolvedValue({ name: 'next_available_slot' });
+    const result = await assistant.chat(doctor, message);
+    expect(result).toMatchObject({ tool: 'upcoming_appointments', data: {
+      timezone: new Intl.DateTimeFormat('en', { timeZone: 'Asia/Kolkata' }).resolvedOptions().timeZone,
+      appointments: [{ id, startsAt, endsAt, patient: { name: patient.name } }],
+    } });
+    expect(JSON.stringify(result.data)).not.toContain('not-for-the-card');
+    expect(JSON.stringify(result.data)).not.toContain('patientId');
+    if (/\p{Script=Devanagari}/u.test(message)) expect(result.reply).toMatch(/आने वाली/);
+    expect(listMineReadOnly).toHaveBeenCalledWith(doctor, { filter: 'upcoming' });
+    expect(selectTool).not.toHaveBeenCalled();
+    expect(findNextDoctorSlot).not.toHaveBeenCalled();
+  });
+
+  it('respects an explicit Hindi reply preference for an English question', async () => {
+    const result = await assistant.chat(doctor, 'Where is my upcoming appointment?', 'hi');
+    expect(result.reply).toBe('आपकी कोई आने वाली अपॉइंटमेंट नहीं है।');
+  });
+
+  it('resolves Hindi day-specific requests without confusing them with the next free slot', async () => {
+    const result = await assistant.chat(doctor, 'आज के मरीज कौन-कौन हैं?');
+    expect(result.tool).toBe('doctor_appointments_by_date');
+    expect(result.reply).toBe('इस तारीख को आपकी कोई अपॉइंटमेंट नहीं है।');
+    expect(listMineReadOnly).toHaveBeenCalledWith(doctor, expect.objectContaining({ date: expect.any(String) }));
+    expect(selectTool).not.toHaveBeenCalled();
+    expect(findNextDoctorSlot).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit free-slot question separate and blocks Hindi write requests', async () => {
+    selectTool.mockResolvedValue({ name: 'next_available_slot' });
+    findNextDoctorSlot.mockResolvedValue({ timezone: 'Asia/Kolkata', slot: null });
+    await expect(assistant.chat(doctor, 'Find my next available slot')).resolves.toMatchObject({ tool: 'next_available_slot' });
+    await expect(assistant.chat(doctor, 'मेरी अगली अपॉइंटमेंट रद्द करो')).resolves.toMatchObject({ tool: 'clarify' });
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it('checks current doctor approval before sending anything to the provider', async () => {
     isApproved.mockResolvedValue(false);
     await expect(assistant.chat(doctor, 'My schedule')).rejects.toBeInstanceOf(ForbiddenException);
@@ -205,7 +251,7 @@ describe('assistant orchestration and read tools', () => {
     listMineReadOnly.mockResolvedValue([{ ...entry, id, patientId: 'private' }]);
     const result = await assistant.chat(doctor, `Show appointments for ${input}`);
     expect(result.tool).toBe('doctor_appointments_by_date');
-    expect(result.data).toEqual({ date, timezone: 'America/New_York', appointments: [entry], hasMore: false });
+    expect(result.data).toEqual({ date, timezone: 'America/New_York', appointments: [{ ...entry, id }], hasMore: false });
     expect(listMineReadOnly).toHaveBeenCalledWith(doctor, { date, timezone: 'America/New_York' });
     expect(selectTool.mock.lastCall?.[0]).not.toContain('2027-01-04');
   });
@@ -390,8 +436,12 @@ describe('assistant orchestration and read tools', () => {
 
   it('passes the authenticated doctor and locally validated appointment ID for details', async () => {
     selectTool.mockResolvedValue({ name: 'appointment_details' });
-    await assistant.chat(doctor, `Show appointment details ${id}`);
+    getMineReadOnly.mockResolvedValue({ id, startsAt: new Date('2026-11-16T04:30:00Z'), endsAt: new Date('2026-11-16T04:45:00Z'),
+      status: 'scheduled', patient: { name: 'Test Patient', email: 'private@example.test' }, patientId: 'private' });
+    const result = await assistant.chat(doctor, `Show appointment details ${id}`);
     expect(getMineReadOnly).toHaveBeenCalledWith(id, doctor);
+    expect(result.data).toMatchObject({ id, patient: { name: 'Test Patient' } });
+    expect(JSON.stringify(result.data)).not.toContain('private');
   });
 
   it('returns the same configured timezone and unchanged UTC instants for doctor lists and details', async () => {

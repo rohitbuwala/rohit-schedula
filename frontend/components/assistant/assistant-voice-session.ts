@@ -29,7 +29,10 @@ export function createAssistantVoiceSession(options: {
       options.onState("starting");
       recorder = await options.start(controller.signal);
       if (controller.signal.aborted) { recorder.cancel(); return; }
-      options.onState("listening");
+      if (stopping) {
+        options.onState("stopping");
+        void recorder.stop().catch(() => {});
+      } else options.onState("listening");
       const audio = await recorder.result;
       if (controller.signal.aborted) return;
       options.onState("transcribing");
@@ -43,10 +46,10 @@ export function createAssistantVoiceSession(options: {
   })();
   return {
     stop() {
-      if (!recorder || stopping || controller.signal.aborted) return;
+      if (stopping || controller.signal.aborted) return;
       stopping = true;
       options.onState("stopping");
-      void recorder.stop().catch(() => {});
+      if (recorder) void recorder.stop().catch(() => {});
     },
     cancel() { controller.abort(); recorder?.cancel(); },
     done,
