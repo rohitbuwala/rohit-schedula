@@ -31,7 +31,7 @@ export function createAuth(database: AuthDatabase) {
     emailAndPassword: { enabled: true },
     user: {
       additionalFields: {
-        role: { type: ['patient', 'doctor', 'admin'], required: false, defaultValue: 'patient', input: false },
+        role: { type: ['patient', 'doctor', 'admin', 'staff'], required: false, defaultValue: 'patient', input: false },
       },
     },
   });

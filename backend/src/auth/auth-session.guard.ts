@@ -8,7 +8,7 @@ const authenticatedUserSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
   email: z.email(),
-  role: z.enum(['patient', 'doctor', 'admin']),
+  role: z.enum(['patient', 'doctor', 'admin', 'staff']),
 });
 
 @Injectable()
