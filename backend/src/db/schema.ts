@@ -143,6 +143,19 @@ export const appointment = pgTable('appointment', {
   check('appointment_time_order_check', sql`${table.endsAt} > ${table.startsAt}`),
 ]);
 
+export const appointmentPrescription = pgTable('appointment_prescription', {
+  appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
+  issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
+  medications: jsonb('medications').$type<Array<{ name: string; instructions: string }>>().notNull(),
+});
+
+export const appointmentIdempotency = pgTable('appointment_idempotency', {
+  patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  key: text('key').notNull(),
+  payloadHash: text('payload_hash').notNull(),
+  appointmentId: text('appointment_id').notNull().references(() => appointment.id, { onDelete: 'restrict' }),
+}, (table) => [uniqueIndex('appointment_idempotency_patient_key_unique').on(table.patientId, table.key)]);
+
 export const patientProfile = pgTable('patient_profile', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().unique().references(() => user.id, { onDelete: 'cascade' }),
@@ -410,6 +423,8 @@ export const schema = {
   verification,
   doctorProfile,
   appointment,
+  appointmentPrescription,
+  appointmentIdempotency,
   patientProfile,
   doctorAvailability,
   doctorLeave,

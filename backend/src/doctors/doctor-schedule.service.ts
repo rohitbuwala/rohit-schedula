@@ -1,6 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { and, asc, eq, gte, gt, inArray, lt, ne, or } from 'drizzle-orm';
+import { and, asc, eq, gte, gt, inArray, lt, ne, or, type SQL } from 'drizzle-orm';
 import { db } from '../db/database.js';
 import {
   appointment,
@@ -18,7 +18,6 @@ import {
   findCapacityConflicts,
   getAvailableSlotsWithCapacity,
   getBookableRescheduleWindow,
-  getDurationForDate,
   isAppointmentCompatibleWithSchedule,
   isBookableSlot,
 } from '../appointments/appointment-availability.js';
@@ -877,6 +876,23 @@ export class DoctorScheduleService {
         conflicts,
       };
     });
+  }
+
+  async checkTimeRangeConflicts(doctorId: string, range: { startsAt: Date; endsAt: Date }) {
+    const rows = await this.scheduledAppointmentsForConflictCheck(
+      doctorId,
+      and(lt(appointment.startsAt, range.endsAt), gt(appointment.endsAt, range.startsAt)),
+    ).orderBy(asc(appointment.startsAt), asc(appointment.id)).limit(51);
+    return { conflicts: rows.slice(0, 50), hasMore: rows.length > 50 };
+  }
+
+  private scheduledAppointmentsForConflictCheck(doctorId: string, condition: SQL | undefined) {
+    return db.select({
+      id: appointment.id,
+      startsAt: appointment.startsAt,
+      endsAt: appointment.endsAt,
+    }).from(appointment)
+      .where(and(eq(appointment.doctorId, doctorId), eq(appointment.status, 'scheduled'), condition));
   }
 
   async getScheduleConfigForProfile(doctorProfileId: string): Promise<DoctorScheduleConfig> {

@@ -13,6 +13,15 @@ export function isExclusionViolation(error: unknown): boolean {
   return false;
 }
 
+export function isLockTimeoutViolation(error: unknown): boolean {
+  let current: unknown = error;
+  while (current && typeof current === 'object') {
+    if ('code' in current && current.code === '55P03') return true;
+    current = 'cause' in current ? current.cause : null;
+  }
+  return false;
+}
+
 export function appointmentWriteError(error: unknown): ConflictException | null {
   return isExclusionViolation(error)
     ? new ConflictException('The doctor is already booked for that time.')

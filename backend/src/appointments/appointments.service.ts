@@ -1,8 +1,8 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, isNotNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { and, asc, count, desc, eq, gte, gt, inArray, isNotNull, lt, lte, ne, not, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
-import { appointment, appointmentHistory, doctorAvailability, doctorProfile, doctorScheduleOverride, payment, refund, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, user } from '../db/schema.js';
+import { appointment, appointmentIdempotency, appointmentPrescription, appointmentHistory, doctorAvailability, doctorScheduleOverride, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, doctorProfile, payment, refund, user, type AppointmentStatus } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -12,14 +12,14 @@ import { EmailOutboxService, emailEventKey } from '../notifications/email-outbox
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import type { EmailEventType } from '../notifications/email-templates.js';
 import { canAccessAppointment } from './appointment-access.js';
-import { createWithConflictHandling, reserveWithinCapacity } from './appointment-conflict.js';
-import { createZonedDate, getAvailableSlotsWithCapacity, getBookableRescheduleWindow, getDurationForDate, isBookableSlot } from './appointment-availability.js';
+import { appointmentWriteError, createWithConflictHandling, isLockTimeoutViolation, reserveWithinCapacity } from './appointment-conflict.js';
+import { candidateSlotsForDate, createZonedDate, getAvailableSlotsWithCapacity, getBookableRescheduleWindow, getDurationForDate, isBookableSlot, isSlotAvailable, type AppointmentSlot } from './appointment-availability.js';
 import type { AppointmentAvailabilityQuery } from './appointment-availability.schema.js';
 import type { z } from 'zod';
 import type { appointmentBookingSchema } from './appointment-booking.schema.js';
 import type { AppointmentRescheduleInput } from './appointment-reschedule.schema.js';
 import { doctorScheduleUpdateSchema } from '../doctors/doctor-schedule.schema.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 type AppointmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -63,6 +63,28 @@ interface DoctorAppointmentRow {
     refundedAmountPaise: number | null;
   } | null;
 }
+
+function appointmentOwner(role: 'patient' | 'doctor', userId: string) {
+  return eq(role === 'patient' ? appointment.patientId : appointment.doctorId, userId);
+}
+
+function doctorAppointmentsOnDay(doctorId: string, day: { date: string; timezone: string }) {
+  return and(
+    appointmentOwner('doctor', doctorId),
+    gte(appointment.startsAt, sql`(${day.date}::date::timestamp AT TIME ZONE ${day.timezone})`),
+    lt(appointment.startsAt, sql`((${day.date}::date + 1)::timestamp AT TIME ZONE ${day.timezone})`),
+  );
+}
+
+const schedulingFields = {
+  id: appointment.id,
+  startsAt: appointment.startsAt,
+  endsAt: appointment.endsAt,
+  status: appointment.status,
+};
+
+export const DEFAULT_SLOT_HORIZON_DAYS = 30;
+export const MAX_SLOT_HORIZON_DAYS = 90;
 
 export function resolvePaymentStatusDisplay(
   paymentRecord: {
@@ -257,7 +279,68 @@ export class AppointmentsService {
     };
   }
 
-  async createForPatient(patientId: string, input: z.infer<typeof appointmentBookingSchema>) {
+  async createForPatient(patientId: string, input: z.infer<typeof appointmentBookingSchema>, key?: string) {
+    if (!key) {
+      if (typeof db.transaction === 'function') {
+        try {
+          const raw = db.transaction(async (tx) => {
+            if (tx.execute) {
+              await tx.execute(sql`set local lock_timeout = '5s'`);
+              await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify([input.doctorProfileId, input.startsAt.toISOString()])}, 1))`);
+            }
+            return this.createPatientHold(patientId, input, tx as unknown as typeof db);
+          });
+          if (raw !== undefined) return await raw;
+        } catch (error) {
+          if (isLockTimeoutViolation(error)) {
+            throw new ServiceUnavailableException('The booking system is currently busy. Please retry in a few moments.');
+          }
+          throw error;
+        }
+      }
+      return this.createPatientHold(patientId, input, db);
+    }
+    const payloadHash = createHash('sha256').update(JSON.stringify([input.doctorProfileId, input.startsAt.toISOString(), input.endsAt.toISOString()])).digest('hex');
+    try {
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify([patientId, key])}, 0))`);
+        const [previous] = await tx.select({ payloadHash: appointmentIdempotency.payloadHash, id: appointment.id,
+          startsAt: appointment.startsAt, endsAt: appointment.endsAt, status: appointment.status, holdExpiresAt: appointment.holdExpiresAt })
+          .from(appointmentIdempotency).innerJoin(appointment, eq(appointment.id, appointmentIdempotency.appointmentId))
+          .where(and(eq(appointmentIdempotency.patientId, patientId), eq(appointmentIdempotency.key, key))).limit(1);
+        if (previous) {
+          if (previous.payloadHash !== payloadHash) throw new ConflictException('Idempotency key was used for a different booking.');
+          const { payloadHash: ignored, ...result } = previous;
+          void ignored;
+          return result;
+        }
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${JSON.stringify([input.doctorProfileId, input.startsAt.toISOString()])}, 1))`);
+        const created = await this.createPatientHold(patientId, input, tx as unknown as typeof db);
+        await tx.insert(appointmentIdempotency).values({ patientId, key, payloadHash, appointmentId: created.id });
+        return created;
+      });
+    } catch (error) {
+      if (isLockTimeoutViolation(error)) {
+        throw new ServiceUnavailableException('The booking system is currently busy. Please retry in a few moments.');
+      }
+      throw error;
+    }
+  }
+
+  async recoverPatientHold(patientId: string, id: string) {
+    const [hold] = await db.select({ id: appointment.id, startsAt: appointment.startsAt, endsAt: appointment.endsAt,
+      status: appointment.status, holdExpiresAt: appointment.holdExpiresAt, doctorProfileId: doctorProfile.id,
+      doctorName: user.name, specialty: doctorProfile.specialty, consultationFeeInr: doctorProfile.consultationFeeInr })
+      .from(appointment).innerJoin(doctorProfile, eq(appointment.doctorId, doctorProfile.userId))
+      .innerJoin(user, eq(user.id, appointment.doctorId))
+      .where(and(eq(appointment.id, id), eq(appointment.patientId, patientId), eq(appointment.status, 'pending_payment'), gt(appointment.holdExpiresAt, new Date())))
+      .limit(1);
+    if (!hold) throw new NotFoundException('Active appointment hold not found.');
+    return hold;
+  }
+
+  private async createPatientHold(patientId: string, input: z.infer<typeof appointmentBookingSchema>, database: typeof db) {
     const doctor = await this.findApprovedDoctor(input.doctorProfileId);
     if (!doctor) throw new NotFoundException('Approved doctor not found.');
     if (doctor.userId === patientId) throw new ForbiddenException();
@@ -271,7 +354,8 @@ export class AppointmentsService {
       throw new BadRequestException('The selected slot is not within the doctor’s available schedule.');
     }
 
-    return createWithConflictHandling(() => db.transaction(async (tx) => {
+    const tx = database as unknown as AppointmentTransaction;
+    return createWithConflictHandling(async () => {
       return reserveWithinCapacity(
         () => this.lockDoctorCapacity(tx, doctor.userId),
         async () => {
@@ -326,7 +410,173 @@ export class AppointmentsService {
           return created;
         },
       );
-    }));
+    });
+  }
+
+  async listMineReadOnly(actor: AuthenticatedUser, scope?: { date: string; timezone: string } | { filter: 'upcoming' | 'past' | 'all' | 'cancellable' | 'reschedulable' }) {
+    if (actor.role === 'patient') {
+      const filter = scope && 'filter' in scope ? scope.filter : 'all';
+      const now = new Date();
+      const upcoming = sql<boolean>`(${or(
+        and(eq(appointment.status, 'scheduled'), gte(appointment.endsAt, now)),
+        and(eq(appointment.status, 'pending_payment'), isNotNull(appointment.holdExpiresAt), gt(appointment.holdExpiresAt, now)),
+      )})`;
+      return db.select({
+        ...schedulingFields,
+        doctor: { id: doctorProfile.id, name: user.name, specialty: doctorProfile.specialty },
+        period: sql<'upcoming' | 'past'>`case when ${upcoming} then 'upcoming' else 'past' end`,
+      }).from(appointment)
+        .innerJoin(user, eq(user.id, appointment.doctorId))
+        .innerJoin(doctorProfile, eq(doctorProfile.userId, user.id))
+        .where(and(
+          appointmentOwner(actor.role, actor.id),
+          filter === 'upcoming' ? upcoming : filter === 'past' ? not(upcoming)
+            : filter === 'cancellable' ? inArray(appointment.status, ['scheduled', 'pending_payment'])
+              : filter === 'reschedulable' ? and(eq(appointment.status, 'scheduled'), eq(doctorProfile.status, 'approved')) : undefined,
+        ))
+        .orderBy(filter === 'upcoming' ? asc(appointment.startsAt) : desc(appointment.startsAt), asc(appointment.id))
+        .limit(51);
+    }
+    if (actor.role !== 'doctor' || !scope || !('date' in scope)) throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    return db.select(schedulingFields).from(appointment)
+      .where(doctorAppointmentsOnDay(actor.id, scope))
+      .orderBy(asc(appointment.startsAt))
+      .limit(51);
+  }
+
+  async listPatientPaymentHistory(actor: AuthenticatedUser) {
+    if (actor.role !== 'patient') throw new ForbiddenException();
+    const rows = await db.select({
+      appointmentStartsAt: appointment.startsAt,
+      doctorName: user.name,
+      amountPaise: payment.amountPaise,
+      currency: payment.currency,
+      paymentStatus: payment.status,
+      refundStatus: sql<'pending' | 'processed' | 'failed' | null>`(
+        select ${refund.status} from ${refund}
+        where ${refund.paymentId} = ${payment.id}
+          and ${refund.patientId} = ${payment.patientId}
+          and ${refund.appointmentId} = ${payment.appointmentId}
+        order by ${refund.createdAt} desc, ${refund.id} desc
+        limit 1
+      )`,
+    }).from(payment)
+      .innerJoin(appointment, and(eq(appointment.id, payment.appointmentId), eq(appointment.patientId, payment.patientId)))
+      .innerJoin(user, eq(user.id, appointment.doctorId))
+      .where(eq(payment.patientId, actor.id))
+      .orderBy(desc(payment.createdAt), desc(payment.id))
+      .limit(51);
+    return { payments: rows.slice(0, 50), hasMore: rows.length > 50 };
+  }
+
+  async listPatientPrescriptions(actor: AuthenticatedUser) {
+    if (actor.role !== 'patient') throw new ForbiddenException();
+    const rows = await db.select({
+      issuedAt: appointmentPrescription.issuedAt,
+      doctorName: user.name,
+      medications: appointmentPrescription.medications,
+    }).from(appointmentPrescription)
+      .innerJoin(appointment, eq(appointment.id, appointmentPrescription.appointmentId))
+      .innerJoin(user, eq(user.id, appointment.doctorId))
+      .where(appointmentOwner('patient', actor.id))
+      .orderBy(desc(appointmentPrescription.issuedAt), asc(appointmentPrescription.appointmentId))
+      .limit(51);
+    return {
+      prescriptions: rows.slice(0, 50).map(({ issuedAt, doctorName, medications }) => ({
+        issuedAt, doctorName, medications: medications.map(({ name, instructions }) => ({ name, instructions })),
+      })),
+      hasMore: rows.length > 50,
+    };
+  }
+
+  async findNextDoctorSlot(actor: AuthenticatedUser, horizonDays = DEFAULT_SLOT_HORIZON_DAYS, now = new Date()) {
+    if (actor.role !== 'doctor') throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    if (!Number.isInteger(horizonDays) || horizonDays < 1 || horizonDays > MAX_SLOT_HORIZON_DAYS) {
+      throw new BadRequestException('Invalid slot search horizon.');
+    }
+    const { timezone, slots } = await this.findDoctorSlots(actor.id, horizonDays, now, 1);
+    return { timezone, slot: slots[0] ?? null };
+  }
+
+  async suggestDoctorRescheduleSlots(actor: AuthenticatedUser, appointmentId: string, now = new Date()) {
+    const selected = await this.getMineReadOnly(appointmentId, actor);
+    if (selected.status !== 'scheduled') throw new ConflictException('Only scheduled appointments can be rescheduled.');
+    return this.findDoctorSlots(actor.id, DEFAULT_SLOT_HORIZON_DAYS, now, 3);
+  }
+
+  async suggestPatientRescheduleSlots(actor: AuthenticatedUser, appointmentId: string, now = new Date()) {
+    if (actor.role !== 'patient') throw new ForbiddenException();
+    const [record] = await db.select({ doctorId: appointment.doctorId, startsAt: appointment.startsAt, status: appointment.status })
+      .from(appointment).where(and(eq(appointment.id, appointmentId), appointmentOwner('patient', actor.id))).limit(1);
+    if (!record) throw new NotFoundException('Appointment not found.');
+    if (record.status !== 'scheduled' || !(await this.doctors.isApproved(record.doctorId))) {
+      throw new ConflictException('This appointment cannot be rescheduled.');
+    }
+    const result = await this.findDoctorSlots(record.doctorId, DEFAULT_SLOT_HORIZON_DAYS, now, 3);
+    return { ...result, currentStartsAt: record.startsAt };
+  }
+
+  private async findDoctorSlots(doctorId: string, horizonDays: number, now: Date, limit: number) {
+    const config = await this.scheduleService?.getScheduleConfigForDoctor(doctorId);
+    if (!config) throw new ServiceUnavailableException('Doctor schedule is unavailable.');
+    const timezone = config.timezone === 'IST' ? 'Asia/Kolkata' : config.timezone ?? 'Asia/Kolkata';
+    const localDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(now);
+    const day = new Date(`${localDate}T00:00:00Z`);
+    const candidates: AppointmentSlot[] = [];
+    for (let offset = 0; offset < horizonDays; offset++) {
+      candidates.push(...candidateSlotsForDate(day.toISOString().slice(0, 10), now, { ...config, timezone }));
+      day.setUTCDate(day.getUTCDate() + 1);
+    }
+    const slots: AppointmentSlot[] = [];
+    if (!candidates.length) return { timezone, slots };
+
+    const busy = await db.select({
+      startsAt: appointment.startsAt,
+      endsAt: appointment.endsAt,
+      status: appointment.status,
+      holdExpiresAt: appointment.holdExpiresAt,
+    }).from(appointment).where(and(
+      appointmentOwner('doctor', doctorId),
+      lt(appointment.startsAt, candidates[candidates.length - 1].endsAt),
+      gt(appointment.endsAt, candidates[0].startsAt),
+      inArray(appointment.status, ['scheduled', 'pending_payment']),
+    ));
+    for (const candidate of candidates) {
+      if (!isSlotAvailable(candidate, busy, now)) continue;
+      slots.push(candidate);
+      if (slots.length === limit) break;
+    }
+    return { timezone, slots };
+  }
+
+  async countDoctorAppointmentsByStatus(actor: AuthenticatedUser, day: { date: string; timezone: string }) {
+    if (actor.role !== 'doctor') throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    const rows = await db.select({ status: appointment.status, count: count() })
+      .from(appointment)
+      .where(doctorAppointmentsOnDay(actor.id, day))
+      .groupBy(appointment.status);
+    const byStatus: Record<AppointmentStatus, number> = {
+      pending_payment: 0, scheduled: 0, completed: 0, cancelled: 0,
+    };
+    let total = 0;
+    for (const row of rows) {
+      byStatus[row.status] = row.count;
+      total += row.count;
+    }
+    return { total, byStatus };
+  }
+
+  async getMineReadOnly(id: string, actor: AuthenticatedUser) {
+    if (actor.role !== 'doctor') throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    const [record] = await db.select(schedulingFields).from(appointment)
+      .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
+      .limit(1);
+    if (!record) throw new NotFoundException('Appointment not found.');
+    return record;
   }
 
   async listMine(actor: AuthenticatedUser) {
@@ -361,8 +611,8 @@ export class AppointmentsService {
       const records: PatientAppointmentRow[] = typeof (baseQuery as any).leftJoin === 'function'
         ? await (baseQuery as any)
             .leftJoin(payment, eq(payment.appointmentId, appointment.id))
-            .where(eq(appointment.patientId, actor.id))
-        : await (baseQuery as any).where(eq(appointment.patientId, actor.id));
+            .where(appointmentOwner(actor.role, actor.id))
+        : await (baseQuery as any).where(appointmentOwner(actor.role, actor.id));
 
       const paymentIds = records
         .map((r) => r.payment?.id)
@@ -487,8 +737,8 @@ export class AppointmentsService {
       const records: DoctorAppointmentRow[] = typeof (baseQuery as any).leftJoin === 'function'
         ? await (baseQuery as any)
             .leftJoin(payment, eq(payment.appointmentId, appointment.id))
-            .where(eq(appointment.doctorId, actor.id))
-        : await (baseQuery as any).where(eq(appointment.doctorId, actor.id));
+            .where(appointmentOwner(actor.role, actor.id))
+        : await (baseQuery as any).where(appointmentOwner(actor.role, actor.id));
 
       const paymentIds = records
         .map((r) => r.payment?.id)
@@ -615,10 +865,10 @@ export class AppointmentsService {
       const [record]: (PatientAppointmentRow | undefined)[] = typeof (baseQuery as any).leftJoin === 'function'
         ? await (baseQuery as any)
             .leftJoin(payment, eq(payment.appointmentId, appointment.id))
-            .where(and(eq(appointment.id, id), eq(appointment.patientId, actor.id)))
+            .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
             .limit(1)
         : await (baseQuery as any)
-            .where(and(eq(appointment.id, id), eq(appointment.patientId, actor.id)))
+            .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
             .limit(1);
 
       if (!record) throw new NotFoundException('Appointment not found.');
@@ -718,10 +968,10 @@ export class AppointmentsService {
       const [record]: (DoctorAppointmentRow | undefined)[] = typeof (baseQuery as any).leftJoin === 'function'
         ? await (baseQuery as any)
             .leftJoin(payment, eq(payment.appointmentId, appointment.id))
-            .where(and(eq(appointment.id, id), eq(appointment.doctorId, actor.id)))
+            .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
             .limit(1)
         : await (baseQuery as any)
-            .where(and(eq(appointment.id, id), eq(appointment.doctorId, actor.id)))
+            .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
             .limit(1);
 
       if (!record) throw new NotFoundException('Appointment not found.');
@@ -796,7 +1046,7 @@ export class AppointmentsService {
     return patient;
   }
 
-  async reschedule(id: string, actor: AuthenticatedUser, input: AppointmentRescheduleInput) {
+  async reschedule(id: string, actor: AuthenticatedUser, input: AppointmentRescheduleInput, expectedStartsAt?: Date) {
     if (actor.role === 'doctor') {
       await this.assertDoctorApproved(actor.role, actor.id);
     } else if (actor.role !== 'patient') {
@@ -831,6 +1081,18 @@ export class AppointmentsService {
       const isDoctorApproved = await this.doctors.isApproved(record.doctorId);
       if (!isDoctorApproved) {
         throw new ConflictException('Cannot reschedule appointment because doctor is currently inactive or unapproved.');
+      }
+
+      if (expectedStartsAt) {
+        if (record.startsAt.getTime() !== expectedStartsAt.getTime()) {
+          throw new ConflictException('The appointment changed. Review it again before confirming.');
+        }
+        const config = await this.scheduleService?.getScheduleConfigForDoctor(record.doctorId);
+        if (!config) throw new ServiceUnavailableException('Doctor schedule is unavailable.');
+        const timezone = config.timezone === 'IST' ? 'Asia/Kolkata' : config.timezone;
+        if (!isBookableSlot(input.startsAt, input.endsAt, new Date(), { ...config, timezone })) {
+          throw new ConflictException('The selected slot is no longer available.');
+        }
       }
 
       if (
@@ -943,10 +1205,7 @@ export class AppointmentsService {
 
         return updated;
       } catch (err: unknown) {
-        if (typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === '23P01') {
-          throw new ConflictException('The selected doctor already has a scheduled appointment in that time slot.');
-        }
-        throw err;
+        throw appointmentWriteError(err) ?? err;
       }
     });
   }
@@ -1280,7 +1539,7 @@ export class AppointmentsService {
     };
   }
 
-  async cancel(id: string, actor: AuthenticatedUser) {
+  async cancel(id: string, actor: AuthenticatedUser, reason = `Appointment cancelled by ${actor.role}`) {
     if (actor.role === 'doctor') {
       await this.assertDoctorApproved(actor.role, actor.id);
     } else if (actor.role !== 'patient') {
@@ -1298,6 +1557,7 @@ export class AppointmentsService {
       paymentIdToRefund,
       remainingPaise,
       actor.role,
+      reason,
     );
 
     return {
@@ -1405,6 +1665,7 @@ export class AppointmentsService {
     paymentIdToRefund: string | null,
     remainingPaise: number,
     actorRole: 'doctor' | 'patient',
+    reason = `Appointment cancelled by ${actorRole}`,
   ) {
     let refundResult = null;
     if (paymentIdToRefund) {
@@ -1419,7 +1680,7 @@ export class AppointmentsService {
           'system',
           paymentIdToRefund,
           {
-            reason: `Appointment cancelled by ${actorRole}`,
+            reason,
             amountPaise: remainingPaise,
           },
         );

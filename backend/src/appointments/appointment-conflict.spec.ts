@@ -1,4 +1,4 @@
-import { appointmentWriteError, createWithConflictHandling, overlaps, reserveWithinCapacity } from './appointment-conflict.js';
+import { appointmentWriteError, createWithConflictHandling, isLockTimeoutViolation, overlaps, reserveWithinCapacity } from './appointment-conflict.js';
 
 describe('scheduled appointment overlap semantics', () => {
   const base = new Date('2027-01-01T10:00:00Z');
@@ -16,6 +16,14 @@ describe('scheduled appointment overlap semantics', () => {
     expect(appointmentWriteError({ code: '23P01' })?.getStatus()).toBe(409);
     expect(appointmentWriteError({ cause: { code: '23P01' } })?.getStatus()).toBe(409);
     expect(appointmentWriteError({ code: '23505' })).toBeNull();
+  });
+
+  it('detects PostgreSQL 55P03 lock timeout errors directly and in wrapped causes', () => {
+    expect(isLockTimeoutViolation({ code: '55P03' })).toBe(true);
+    expect(isLockTimeoutViolation({ cause: { code: '55P03' } })).toBe(true);
+    expect(isLockTimeoutViolation({ cause: { cause: { code: '55P03' } } })).toBe(true);
+    expect(isLockTimeoutViolation({ code: '23P01' })).toBe(false);
+    expect(isLockTimeoutViolation(null)).toBe(false);
   });
 
   it('returns one success and one 409 for simultaneous conflicting inserts', async () => {

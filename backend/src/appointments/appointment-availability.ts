@@ -186,14 +186,12 @@ export function getAvailableSlots(
   now = new Date(),
   config?: DoctorScheduleConfig
 ): AppointmentSlot[] {
-  return candidateSlotsForDate(date, now, config).filter(
-    (slot) =>
-      !appointments.some(
-        (existing) =>
-          isAppointmentBusy(existing, now) &&
-          slot.startsAt.getTime() < existing.endsAt.getTime() &&
-          existing.startsAt.getTime() < slot.endsAt.getTime()
-      )
+  return candidateSlotsForDate(date, now, config).filter((slot) => isSlotAvailable(slot, appointments, now));
+}
+
+export function isSlotAvailable(slot: AppointmentSlot, appointments: ExistingAppointment[], now: Date): boolean {
+  return !appointments.some((existing) =>
+    isAppointmentBusy(existing, now) && slot.startsAt < existing.endsAt && existing.startsAt < slot.endsAt,
   );
 }
 
