@@ -96,7 +96,7 @@ describe('queue SQL and database guarantees', () => {
   });
 
   it('keeps migration and generated snapshot aligned without modifying booking/payment tables', () => {
-    const migration = readFileSync(new URL('../../drizzle/0019_patient_queue.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../drizzle/0019_patient_queue.sql', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
     const previous = JSON.parse(readFileSync(new URL('../../drizzle/meta/0018_snapshot.json', import.meta.url), 'utf8'));
     const current = JSON.parse(readFileSync(new URL('../../drizzle/meta/0019_snapshot.json', import.meta.url), 'utf8'));
     expect(current.prevId).toBe(previous.id);
@@ -105,8 +105,8 @@ describe('queue SQL and database guarantees', () => {
     for (const [name, table] of Object.entries(previous.tables)) expect(current.tables[name]).toEqual(table);
     expect(migration).not.toMatch(/ALTER TABLE "(?:appointment|payment|refund)"|DROP |TRUNCATE |DELETE FROM /);
     for (const check of getTableConfig(appointmentAttendance).checks) {
-      const sql = new PgDialect().sqlToQuery(check.value).sql;
-      expect(current.tables['public.appointment_attendance'].checkConstraints[check.name].value).toBe(sql);
+      const sql = new PgDialect().sqlToQuery(check.value).sql.replace(/\r\n/g, '\n');
+      expect(current.tables['public.appointment_attendance'].checkConstraints[check.name].value.replace(/\r\n/g, '\n')).toBe(sql);
       expect(migration).toContain(sql);
     }
   });
