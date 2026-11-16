@@ -26,7 +26,7 @@ interface NavItem {
 }
 
 interface AppShellProps {
-  role: "patient" | "doctor" | "admin";
+  role: "patient" | "doctor" | "admin" | "staff";
   userName: string;
   children: React.ReactNode;
 }
@@ -121,7 +121,9 @@ export function AppShell({ role, userName, children }: AppShellProps) {
   }
 
   const navItems: NavItem[] =
-    role === "patient"
+    role === "staff"
+      ? [{ label: "Patient Queue", href: "/staff/dashboard", icon: LayoutDashboard }]
+      : role === "patient"
       ? [
           { label: "Dashboard Overview", href: "/patient/dashboard", icon: LayoutDashboard },
           { label: "Book Appointment", href: "/patient/book-appointment", icon: Calendar },
@@ -134,10 +136,15 @@ export function AppShell({ role, userName, children }: AppShellProps) {
           { label: "Practice Profile", href: "/doctor/profile", icon: Stethoscope },
         ]
       : [
-          { label: "Admin Applications", href: "/admin", icon: ShieldCheck },
+          { label: "Administration", href: "/admin", icon: ShieldCheck },
         ];
 
   const roleLabels: Record<string, { title: string; badge: string; color: string }> = {
+    staff: {
+      title: "STAFF PORTAL",
+      badge: "Staff",
+      color: "bg-teal-50 text-teal-700 border-teal-200",
+    },
     patient: {
       title: "Patient Portal",
       badge: "Patient",
