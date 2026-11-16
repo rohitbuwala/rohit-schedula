@@ -54,7 +54,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
       }
 
       const role = (session.user as { role?: string }).role;
-      let destination = role === "admin" ? "/admin" : role === "doctor" ? "/doctor/dashboard" : "/patient/dashboard";
+      let destination = role === "admin" ? "/admin" : role === "staff" ? "/staff/dashboard" : role === "doctor" ? "/doctor/dashboard" : "/patient/dashboard";
 
       // If user has role 'patient', check if they are a doctor applicant awaiting review
       if (role === "patient" || !role) {
