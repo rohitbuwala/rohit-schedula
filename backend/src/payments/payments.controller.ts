@@ -55,7 +55,9 @@ export class PaymentsController {
     @Req() req: Request & { rawBody?: Buffer },
     @Body() body: unknown,
   ) {
-    const rawBody = req.rawBody ?? JSON.stringify(body);
-    return this.payments.handleWebhook(signature, rawBody, body);
+    if (!req.rawBody) {
+      throw new BadRequestException('Missing request raw body for webhook verification.');
+    }
+    return this.payments.handleWebhook(signature, req.rawBody, body);
   }
 }

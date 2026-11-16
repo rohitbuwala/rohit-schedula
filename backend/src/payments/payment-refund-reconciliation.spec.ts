@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
@@ -31,9 +32,33 @@ describe('Refund Management & Reconciliation', () => {
   const sampleSecret = 'sample_test_secret_32_chars_long!!';
   const sampleWebhookSecret = 'sample_test_webhook_secret_32_c!!';
 
+  it('logs a redacted startup transport failure and retries at the next scheduled sweep', async () => {
+    const cause = Object.assign(new Error('private connection details'), { code: 'ECONNRESET' });
+    const event = Object.assign(new Event('error'), { error: new TypeError('private WebSocket detail', { cause }) });
+    const sweep = vi.spyOn(reconciliationService, 'reconcileInconsistentPayments')
+      .mockRejectedValueOnce(new Error('private SQL and parameters', { cause: event }))
+      .mockResolvedValueOnce(0);
+    const log = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+    try {
+      await expect(reconciliationService.onModuleInit()).resolves.toBeUndefined();
+      expect(log.mock.calls).toEqual([[
+        'Startup payment reconciliation failed. Next attempt at the scheduled sweep. Database diagnostic: ECONNRESET',
+      ]]);
+      await expect(reconciliationService.handleCron()).resolves.toBeUndefined();
+      expect(sweep).toHaveBeenCalledTimes(2);
+    } finally {
+      log.mockRestore();
+      sweep.mockRestore();
+    }
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
 
+    process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/test';
+    process.env.BETTER_AUTH_URL = 'http://localhost:5000';
+    process.env.FRONTEND_URL = 'http://localhost:3000';
+    process.env.BETTER_AUTH_SECRET = 'sample_secret_must_be_32_characters_minimum!';
     process.env.RAZORPAY_KEY_ID = 'rzp_test_12345';
     process.env.RAZORPAY_KEY_SECRET = sampleSecret;
     process.env.RAZORPAY_WEBHOOK_SECRET = sampleWebhookSecret;

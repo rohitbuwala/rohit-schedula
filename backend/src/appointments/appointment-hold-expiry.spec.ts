@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger } from '@nestjs/common';
 import { AppointmentExpiryService } from './appointment-expiry.service.js';
 import { AppointmentsService } from './appointments.service.js';
 import { getAvailableSlots } from './appointment-availability.js';
@@ -14,6 +14,10 @@ vi.mock('../db/database.js', () => ({
     insert: vi.fn(),
   },
 }));
+
+function lockedRows(limit: any) {
+  return { limit, then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve(limit()).then(resolve) };
+}
 
 describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
   let expiryService: AppointmentExpiryService;
@@ -90,6 +94,18 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
       });
     };
 
+    it('revalidates the selected doctor’s current schedule before creating a hold', async () => {
+      setupDoctorMock();
+      const getScheduleConfigForProfile = vi.fn().mockResolvedValue({
+        timezone: 'Asia/Kolkata', activeDays: [1], startHour: 9, endHour: 17, slotDurationMinutes: 30,
+        leaveDates: ['2027-01-04'],
+      });
+      const service = new AppointmentsService(mockDoctors, { getScheduleConfigForProfile } as never);
+      await expect(service.createForPatient(patientId, { doctorProfileId, startsAt, endsAt }))
+        .rejects.toBeInstanceOf(BadRequestException);
+      expect(getScheduleConfigForProfile).toHaveBeenCalledWith(doctorProfileId);
+      expect(db.insert).not.toHaveBeenCalled();
+    });
     const setupCapacityTransaction = (occupiedRows: unknown[] = [], insertResult?: unknown[], insertError?: Error, capacity = 1) => {
       const queuedResults = [[{}], [{ capacity }], [], occupiedRows]; // doctor lock, weekly config, date override, active occupancy
       const tx: any = {
@@ -190,6 +206,31 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
   });
 
   describe('AppointmentExpiryService Background Cleanup', () => {
+    it('allows startup after a WebSocket error and retries on the scheduled sweep', async () => {
+      const log = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+      vi.mocked(db.transaction).mockRejectedValueOnce(
+        new Error('private SQL and parameters', { cause: new Event('error') }),
+      ).mockResolvedValueOnce(0);
+      try {
+        await expect(expiryService.onModuleInit()).resolves.toBeUndefined();
+        expect(log.mock.calls).toEqual([[
+          'Startup hold cleanup failed. Next attempt at the scheduled sweep. Database diagnostic: websocket_error',
+        ]]);
+        await expect(expiryService.handleCron()).resolves.toBeUndefined();
+        expect(db.transaction).toHaveBeenCalledTimes(4);
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it('still rejects startup on a schema error', async () => {
+      const error = new Error('failed query', {
+        cause: Object.assign(new Error('missing column'), { code: '42703' }),
+      });
+      vi.mocked(db.transaction).mockRejectedValueOnce(error);
+      await expect(expiryService.onModuleInit()).rejects.toBe(error);
+    });
+
     it('returns 0 when no expired holds exist', async () => {
       const mockTx = {
         select: vi.fn().mockReturnValueOnce({
@@ -198,7 +239,7 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           }),
         }),
       };
-      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
+      (db.transaction as any).mockImplementation(async (cb: any) => cb(mockTx));
 
       const count = await expiryService.cleanupExpiredHolds();
       expect(count).toBe(0);
@@ -225,14 +266,12 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
               where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([
+                for: vi.fn().mockReturnValueOnce(lockedRows(vi.fn().mockResolvedValueOnce([
                     {
                       id: 'pay-1',
                       status: 'created',
                     },
-                  ]),
-                }),
+                  ]))),
               }),
             }),
           })
@@ -240,15 +279,13 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
               where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([{
+                for: vi.fn().mockReturnValueOnce(lockedRows(vi.fn().mockResolvedValueOnce([{
                     id: expiredApptId,
                     patientId: 'pat-1',
                     doctorId: 'doc-1',
                     startsAt: new Date('2027-01-02T12:00:00Z'),
                     reminderGeneration: 0,
-                  }]),
-                }),
+                  }]))),
               }),
             }),
           }),
@@ -267,7 +304,7 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
             }),
           }),
       };
-      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
+      (db.transaction as any).mockImplementation(async (cb: any) => cb(mockTx));
 
       const count = await expiryService.cleanupExpiredHolds();
       expect(count).toBe(1);
@@ -296,14 +333,12 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
               where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([
+                for: vi.fn().mockReturnValueOnce(lockedRows(vi.fn().mockResolvedValueOnce([
                     {
                       id: 'pay-1',
                       status: 'captured',
                     },
-                  ]),
-                }),
+                  ]))),
               }),
             }),
           })
@@ -311,15 +346,13 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
           .mockReturnValueOnce({
             from: vi.fn().mockReturnValueOnce({
               where: vi.fn().mockReturnValueOnce({
-                for: vi.fn().mockReturnValueOnce({
-                  limit: vi.fn().mockResolvedValueOnce([{
+                for: vi.fn().mockReturnValueOnce(lockedRows(vi.fn().mockResolvedValueOnce([{
                     id: raceApptId,
                     patientId: 'pat-1',
                     doctorId: 'doc-1',
                     startsAt: new Date('2027-01-02T12:00:00Z'),
                     reminderGeneration: 0,
-                  }]),
-                }),
+                  }]))),
               }),
             }),
           }),
@@ -332,7 +365,7 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
             }),
           }),
       };
-      (db.transaction as any).mockImplementationOnce(async (cb: any) => cb(mockTx));
+      (db.transaction as any).mockImplementation(async (cb: any) => cb(mockTx));
 
       const count = await expiryService.cleanupExpiredHolds();
       // 0 appointments cancelled
@@ -359,6 +392,102 @@ describe('Appointment Hold & Expiry Logic (Phase 4)', () => {
 
       expect(count1).toBe(0);
       expect(count2).toBe(0);
+    });
+
+    it('processes multiple expired holds across batch boundaries', async () => {
+      let callCount = 0;
+      const appt1 = { id: 'appt-batch-1', patientId: 'p1', doctorId: 'd1' };
+      const appt2 = { id: 'appt-batch-2', patientId: 'p2', doctorId: 'd2' };
+      const appt3 = { id: 'appt-batch-3', patientId: 'p3', doctorId: 'd3' };
+
+      const mockTx = {
+        select: vi.fn().mockReturnValue({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              for: vi.fn().mockReturnValue(lockedRows(vi.fn().mockImplementation(() => {
+                  return Promise.resolve([{ id: 'pay-1', status: 'created' }]);
+                }))),
+            }),
+          }),
+        }),
+        update: vi.fn().mockReturnValue({
+          set: vi.fn().mockReturnValue({
+            where: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      };
+
+      (db.transaction as any).mockImplementation(async (cb: any) => {
+        callCount++;
+        // Batch 1 discovery
+        if (callCount === 1) {
+          return [appt1, appt2];
+        }
+        // Appt 1 processing
+        if (callCount === 2) {
+          return cb(mockTx);
+        }
+        // Appt 2 processing
+        if (callCount === 3) {
+          return cb(mockTx);
+        }
+        // Batch 2 discovery
+        if (callCount === 4) {
+          return [appt3];
+        }
+        // Appt 3 processing
+        if (callCount === 5) {
+          return cb(mockTx);
+        }
+        return [];
+      });
+
+      const totalCancelled = await expiryService.cleanupExpiredHolds(new Date(), 2, 5);
+      expect(totalCancelled).toBe(3);
+      expect(mockTx.update).toHaveBeenCalledTimes(6); // 2 updates (pay + appt) * 3 appts
+    });
+
+    it('isolates partial failures so that one candidate failure does not rollback others', async () => {
+      const apptFail = { id: 'appt-fail-1', patientId: 'p1', doctorId: 'd1' };
+      const apptSuccess = { id: 'appt-ok-2', patientId: 'p2', doctorId: 'd2' };
+
+      const mockTx = {
+        select: vi.fn().mockReturnValue({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              for: vi.fn().mockReturnValue(lockedRows(vi.fn().mockResolvedValue([{ id: 'pay-ok', status: 'created' }]))),
+            }),
+          }),
+        }),
+        update: vi.fn().mockReturnValue({
+          set: vi.fn().mockReturnValue({
+            where: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      };
+
+      let callIndex = 0;
+      (db.transaction as any).mockImplementation(async (cb: any) => {
+        callIndex++;
+        if (callIndex === 1) {
+          // Candidate discovery
+          return [apptFail, apptSuccess];
+        }
+        if (callIndex === 2) {
+          // Candidate 1 fails
+          throw new Error('Database transaction serialization error');
+        }
+        if (callIndex === 3) {
+          // Candidate 2 succeeds
+          return cb(mockTx);
+        }
+        return [];
+      });
+
+      const totalCancelled = await expiryService.cleanupExpiredHolds(new Date(), 10, 1);
+      // apptFail failed, apptSuccess succeeded
+      expect(totalCancelled).toBe(1);
+      expect(mockTx.update).toHaveBeenCalledTimes(2); // payment + appointment for apptSuccess
     });
   });
 });
