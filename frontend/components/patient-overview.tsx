@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   ArrowRight,
@@ -31,9 +31,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 interface PatientOverviewProps {
   name: string;
+  assistant?: ReactNode;
 }
 
-export function PatientOverview({ name }: PatientOverviewProps) {
+export function PatientOverview({ name, assistant }: PatientOverviewProps) {
   const [appointments, setAppointments] = useState<PatientAppointment[]>([]);
   const [notifications, setNotifications] = useState<InAppNotification[]>([]);
   const [doctorCount, setDoctorCount] = useState<number | null>(null);
@@ -168,7 +169,7 @@ export function PatientOverview({ name }: PatientOverviewProps) {
   }
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-8 space-y-8">
+    <div className={`mx-auto w-full max-w-6xl space-y-8 px-4 pt-8 sm:px-8 ${assistant ? "pb-[calc(6rem+env(safe-area-inset-bottom))]" : "pb-8"}`}>
       {/* Hero Welcome Banner */}
       <div className="relative overflow-hidden rounded-3xl border border-teal-100 bg-gradient-to-br from-teal-900 via-teal-800 to-slate-900 p-6 sm:p-8 text-white shadow-lg">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -535,6 +536,7 @@ export function PatientOverview({ name }: PatientOverviewProps) {
           onCancelled={() => setRefreshKey((k) => k + 1)}
         />
       </div>
+      {assistant}
     </div>
   );
 }

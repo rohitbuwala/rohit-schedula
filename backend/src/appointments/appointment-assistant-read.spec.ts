@@ -115,12 +115,28 @@ describe('assistant appointment reads', () => {
     expect(predicate.params).toEqual([doctor.id, day.date, day.timezone, day.date, day.timezone]);
   });
 
+  it('reads only the approved doctor’s future booked appointments and patient names', async () => {
+    await service.listMineReadOnly(doctor, { filter: 'upcoming' });
+    const predicate = dialect.sqlToQuery(query.where.mock.calls[0][0]);
+    expect(predicate.sql).toContain('"appointment"."doctor_id"');
+    expect(predicate.sql).toContain('"appointment"."starts_at" >=');
+    expect(predicate.params[0]).toBe(doctor.id);
+    expect(predicate.params).toContain('scheduled');
+    expect(query.limit).toHaveBeenCalledWith(51);
+    const fields = vi.mocked(db.select).mock.calls[0][0] as { patient: object };
+    expect(Object.keys(fields.patient)).toEqual(['name']);
+    isApproved.mockResolvedValue(false);
+    vi.mocked(db.select).mockClear();
+    await expect(service.listMineReadOnly(doctor, { filter: 'upcoming' })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(db.select).not.toHaveBeenCalled();
+  });
+
   it('returns the same not-found response for another doctor’s or a missing appointment', async () => {
     await expect(service.getMineReadOnly('foreign-appointment', doctor)).rejects.toBeInstanceOf(NotFoundException);
     const predicate = dialect.sqlToQuery(query.where.mock.calls[0][0]);
     expect(predicate.sql).toContain('"appointment"."doctor_id"');
     expect(predicate.params).toEqual(['foreign-appointment', doctor.id]);
-    expect(Object.keys(vi.mocked(db.select).mock.calls[0][0] ?? {})).toEqual(['id', 'startsAt', 'endsAt', 'status']);
+    expect(Object.keys(vi.mocked(db.select).mock.calls[0][0] ?? {})).toEqual(['id', 'startsAt', 'endsAt', 'status', 'patient']);
   });
 
   it('rejects unapproved doctors before accessing appointments', async () => {

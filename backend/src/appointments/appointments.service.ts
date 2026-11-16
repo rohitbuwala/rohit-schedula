@@ -437,10 +437,13 @@ export class AppointmentsService {
         .orderBy(filter === 'upcoming' ? asc(appointment.startsAt) : desc(appointment.startsAt), asc(appointment.id))
         .limit(51);
     }
-    if (actor.role !== 'doctor' || !scope || !('date' in scope)) throw new ForbiddenException();
+    if (actor.role !== 'doctor' || !scope || (!('date' in scope) && scope.filter !== 'upcoming')) throw new ForbiddenException();
     await this.assertDoctorApproved(actor.role, actor.id);
-    return db.select(schedulingFields).from(appointment)
-      .where(doctorAppointmentsOnDay(actor.id, scope))
+    return db.select({ ...schedulingFields, patient: { name: user.name } }).from(appointment)
+      .innerJoin(user, eq(user.id, appointment.patientId))
+      .where('date' in scope ? doctorAppointmentsOnDay(actor.id, scope) : and(
+        appointmentOwner('doctor', actor.id), eq(appointment.status, 'scheduled'), gte(appointment.startsAt, new Date()),
+      ))
       .orderBy(asc(appointment.startsAt))
       .limit(51);
   }
@@ -572,7 +575,8 @@ export class AppointmentsService {
   async getMineReadOnly(id: string, actor: AuthenticatedUser) {
     if (actor.role !== 'doctor') throw new ForbiddenException();
     await this.assertDoctorApproved(actor.role, actor.id);
-    const [record] = await db.select(schedulingFields).from(appointment)
+    const [record] = await db.select({ ...schedulingFields, patient: { name: user.name } }).from(appointment)
+      .innerJoin(user, eq(user.id, appointment.patientId))
       .where(and(eq(appointment.id, id), appointmentOwner(actor.role, actor.id)))
       .limit(1);
     if (!record) throw new NotFoundException('Appointment not found.');
