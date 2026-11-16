@@ -464,6 +464,7 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
   await click(launcherLabel);
   await click("Book an appointment");
   await until(() => evaluate("Boolean(document.querySelector('section[aria-label=\"Appointment booking draft\"]'))"), "booking draft");
+  await until(() => evaluate(`Array.from(document.querySelectorAll('section[aria-label="Appointment booking draft"] button')).some(b => b.textContent.includes('Dr. Fixture'))`), "booking doctor list");
   await evaluate(`Array.from(document.querySelectorAll('section[aria-label="Appointment booking draft"] button')).find(b => b.textContent.includes('Dr. Fixture')).click()`);
   await evaluate("document.querySelector('section[id$=panel] input').focus()");
   await send("Input.insertText", { text: "tomorrow" });
