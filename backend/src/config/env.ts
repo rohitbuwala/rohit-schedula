@@ -14,6 +14,10 @@ export interface AppEnvironment {
   emailFrom?: string;
   emailDeliveryMode: 'disabled' | 'test' | 'production';
   emailTestRecipient?: string;
+  geminiApiKey?: string;
+  geminiModel?: string;
+  geminiTimeoutMs: number;
+  sarvamApiKey?: string;
 }
 
 const databaseUrlSchema = z.url().refine((value) => ['postgres:', 'postgresql:'].includes(new URL(value).protocol));
@@ -34,6 +38,10 @@ const environmentSchema = z.object({
   EMAIL_FROM: z.string().trim().min(1).optional(),
   EMAIL_DELIVERY_MODE: z.enum(['disabled', 'test', 'production']).default('disabled'),
   EMAIL_TEST_RECIPIENT: z.email().optional(),
+  GEMINI_API_KEY: z.string().trim().min(1).optional(),
+  GEMINI_MODEL: z.string().trim().regex(/^gemini-[a-z0-9][a-z0-9.-]*$/).optional(),
+  GEMINI_TIMEOUT_MS: z.preprocess((value) => value ?? '20000', z.coerce.number().int().min(1000).max(60000)),
+  SARVAM_API_KEY: z.string().trim().min(1).optional(),
 });
 
 function parseEnvironment(input: unknown): z.infer<typeof environmentSchema> {
@@ -66,5 +74,9 @@ export function loadEnv(): AppEnvironment {
     emailFrom: env.EMAIL_FROM,
     emailDeliveryMode: env.EMAIL_DELIVERY_MODE,
     emailTestRecipient: env.EMAIL_TEST_RECIPIENT,
+    geminiApiKey: env.GEMINI_API_KEY,
+    geminiModel: env.GEMINI_MODEL,
+    geminiTimeoutMs: env.GEMINI_TIMEOUT_MS,
+    sarvamApiKey: env.SARVAM_API_KEY,
   };
 }

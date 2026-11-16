@@ -49,6 +49,30 @@ describe('environment validation', () => {
     expect(() => loadEnv()).toThrow('RAZORPAY_KEY_ID');
   });
 
+  it('loads optional server-side Gemini settings and rejects invalid model paths', () => {
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.stubEnv('GEMINI_MODEL', 'gemini-test');
+    try {
+      expect(loadEnv()).toMatchObject({ geminiApiKey: 'test-api-key', geminiModel: 'gemini-test' });
+      vi.stubEnv('GEMINI_MODEL', 'gemini-test/invalid');
+      expect(() => loadEnv()).toThrow('GEMINI_MODEL');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('uses a 20-second Gemini deadline by default and validates overrides', () => {
+    vi.stubEnv('GEMINI_TIMEOUT_MS', undefined);
+    expect(loadEnv().geminiTimeoutMs).toBe(20000);
+    vi.stubEnv('GEMINI_TIMEOUT_MS', '12000');
+    expect(loadEnv().geminiTimeoutMs).toBe(12000);
+    for (const invalid of ['0', '60001', '2.5', 'not-a-number']) {
+      vi.stubEnv('GEMINI_TIMEOUT_MS', invalid);
+      expect(() => loadEnv()).toThrow('GEMINI_TIMEOUT_MS');
+    }
+    vi.unstubAllEnvs();
+  });
+
   it('rejects empty RAZORPAY_KEY_ID', () => {
     process.env.RAZORPAY_KEY_ID = '   ';
     expect(() => loadEnv()).toThrow('RAZORPAY_KEY_ID');

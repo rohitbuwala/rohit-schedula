@@ -3,8 +3,10 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule, ObserveInstrument } from './app.module.js';
 import { registerAuthHandler } from './auth/auth-handler.js';
 import { loadEnv } from './config/env.js';
+import { createRateLimiterMiddleware } from './config/rate-limiter.js';
+import { createSecurityHeadersMiddleware } from './config/security-headers.js';
 
-function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): boolean {
+export function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): boolean {
   if (origin === configuredOrigin || origin === 'https://rohit-schedula.vercel.app') return true;
 
   try {
@@ -13,7 +15,6 @@ function isAllowedFrontendOrigin(origin: string, configuredOrigin: string): bool
     const hostname = url.hostname;
     return (
       hostname === 'rohit-schedula.vercel.app' ||
-      /^rohit-schedula(?:-[a-z0-9-]+)?\.vercel\.app$/.test(hostname) ||
       /^rohit-schedula-(?:git-[a-z0-9-]+-)?[a-z0-9-]+-rohit-buwalas-projects\.vercel\.app$/.test(hostname)
     );
   } catch {
@@ -39,6 +40,9 @@ async function bootstrap() {
   });
 
   const server = app.getHttpAdapter().getInstance();
+  server.disable('x-powered-by');
+  server.use(createSecurityHeadersMiddleware());
+  server.use(createRateLimiterMiddleware());
   registerAuthHandler(server);
   app.use(
     express.json({
@@ -50,4 +54,6 @@ async function bootstrap() {
 
   await app.listen(env.port, '0.0.0.0');
 }
-await bootstrap();
+if (process.env.NODE_ENV !== 'test') {
+  await bootstrap();
+}
