@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { z } from "zod";
+import { parseDoctorApplicationResponseBody } from "@/lib/doctor-application-response";
 
 const sessionSchema = z.object({
   user: z.object({ id: z.string(), name: z.string(), email: z.email(), role: z.enum(["patient", "doctor", "admin"]).optional() }),
@@ -20,6 +21,23 @@ export async function getVerifiedSession() {
     return result.success ? result.data : null;
   } catch {
     return null;
+  }
+}
+
+export async function canShowAssistant(role: "patient" | "doctor") {
+  try {
+    const cookie = (await headers()).get("cookie");
+    if (!cookie) return false;
+    const path = role === "doctor" ? "/api/doctors/me" : "/api/doctor-applications/me";
+    const response = await fetch(`${authUrl}${path}`, {
+      headers: { cookie },
+      cache: "no-store",
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return false;
+    return role === "doctor" || parseDoctorApplicationResponseBody(await response.text())?.status !== "pending";
+  } catch {
+    return false;
   }
 }
 

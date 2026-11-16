@@ -2,11 +2,12 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Stethoscope, User, ShieldCheck } from "lucide-react";
-import { getVerifiedSession } from "@/lib/auth-server";
+import { canShowAssistant, getVerifiedSession } from "@/lib/auth-server";
 import { parseDoctorApplicationResponseBody } from "@/lib/doctor-application-response";
 import { DoctorAppointments } from "@/components/doctor-appointments";
 import { DoctorPendingDashboard } from "@/components/doctor-pending-dashboard";
 import { AppShell } from "@/components/app-shell";
+import { AssistantPanel } from "@/components/assistant/assistant-panel";
 
 export const instant = false;
 
@@ -19,9 +20,10 @@ export default async function DoctorDashboard() {
   if (session.user.role === "admin") redirect("/admin");
 
   if (session.user.role === "doctor") {
+    const showAssistant = await canShowAssistant("doctor");
     return (
       <AppShell role="doctor" userName={session.user.name}>
-        <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-8 space-y-8">
+        <div className={`mx-auto w-full max-w-6xl space-y-8 px-4 pt-8 sm:px-8 ${showAssistant ? "pb-[calc(6rem+env(safe-area-inset-bottom))]" : "pb-8"}`}>
           {/* Approved Physician Header Banner */}
           <div className="rounded-3xl border border-blue-100 bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 p-6 sm:p-8 text-white shadow-lg">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -58,6 +60,7 @@ export default async function DoctorDashboard() {
 
           {/* Doctor Appointments Queue & Workspace */}
           <DoctorAppointments />
+          {showAssistant && <AssistantPanel key={session.user.id} role="doctor" />}
         </div>
       </AppShell>
     );
