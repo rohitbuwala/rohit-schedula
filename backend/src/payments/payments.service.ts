@@ -27,6 +27,8 @@ import type {
   VerifyPaymentDto,
 } from './payments.schema.js';
 
+import { AppointmentQueueLifecycleService } from '../appointments/appointment-queue-lifecycle.service.js';
+
 type PaymentsTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 @Injectable()
@@ -45,6 +47,7 @@ export class PaymentsService {
     private readonly scheduleService?: DoctorScheduleService,
     @Optional()
     private readonly appointmentReminders?: AppointmentReminderService,
+    @Optional() private readonly queueLifecycle?: AppointmentQueueLifecycleService,
   ) {
     this.env = loadEnv();
   }
@@ -72,6 +75,7 @@ export class PaymentsService {
     target: { id: string; doctorId: string; startsAt: Date; endsAt: Date },
   ): Promise<boolean> {
     if (target.startsAt.getTime() <= Date.now()) return false;
+    if (this.queueLifecycle && !await this.queueLifecycle.canRestoreCancelledBooking(tx, target.id)) return false;
     try {
       await reserveWithinCapacity(
         () => this.lockDoctorCapacity(tx, target.doctorId),
@@ -253,7 +257,7 @@ export class PaymentsService {
       await db
         .update(appointment)
         .set({ status: 'cancelled', updatedAt: new Date() })
-        .where(eq(appointment.id, record.id));
+        .where(and(eq(appointment.id, record.id), eq(appointment.status, 'pending_payment')));
       throw new BadRequestException('The booking hold for this slot has expired. Please select a new slot.');
     }
 
@@ -404,6 +408,7 @@ export class PaymentsService {
     // 2. Fetch payment and appointment records inside transaction with canonical lock order: payment -> appointment
     const verificationResult = await this.withDeadlockRetry(async () => {
       return db.transaction(async (tx) => {
+        await this.queueLifecycle?.lockPaymentDoctor(tx, input.razorpayOrderId);
         // Step 2a: Lock payment row FIRST
         const [paymentRecord] = await tx
           .select()
@@ -563,7 +568,7 @@ export class PaymentsService {
           holdExpiresAt: null,
           updatedAt: new Date(),
         })
-        .where(eq(appointment.id, paymentRecord.appointmentId))
+        .where(and(eq(appointment.id, paymentRecord.appointmentId), or(eq(appointment.status, 'pending_payment'), eq(appointment.status, 'cancelled'))))
         .returning({
           id: appointment.id,
           patientId: appointment.patientId,
@@ -576,6 +581,7 @@ export class PaymentsService {
         });
 
       if (updatedAppt) {
+        await this.queueLifecycle?.bookingChanged(tx, [updatedAppt]);
         await this.scheduleAppointmentReminders(tx, updatedAppt);
         await this.enqueuePaymentConfirmationEmails(tx, {
           appointmentId: updatedAppt.id,
@@ -928,6 +934,7 @@ export class PaymentsService {
 
       const result = await this.withDeadlockRetry(async () => {
         return db.transaction(async (tx) => {
+          await this.queueLifecycle?.lockPaymentDoctor(tx, orderId);
           // Step 1: Lock payment row FIRST
           const [paymentRecord] = await tx
             .select()
@@ -1053,7 +1060,7 @@ export class PaymentsService {
             holdExpiresAt: null,
             updatedAt: new Date(),
           })
-          .where(eq(appointment.id, paymentRecord.appointmentId))
+          .where(and(eq(appointment.id, paymentRecord.appointmentId), or(eq(appointment.status, 'pending_payment'), eq(appointment.status, 'cancelled'))))
           .returning({
             id: appointment.id,
             patientId: appointment.patientId,
@@ -1066,6 +1073,7 @@ export class PaymentsService {
           });
 
         if (updatedAppt) {
+          await this.queueLifecycle?.bookingChanged(tx, [updatedAppt]);
           await this.scheduleAppointmentReminders(tx, updatedAppt);
           await this.enqueuePaymentConfirmationEmails(tx, {
             appointmentId: updatedAppt.id,

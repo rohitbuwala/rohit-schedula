@@ -9,9 +9,10 @@ import { AdminPaymentsController } from './admin-payments.controller.js';
 import { PaymentsService } from './payments.service.js';
 import { PaymentReconciliationService } from './payment-reconciliation.service.js';
 import { razorpayProvider } from './razorpay.provider.js';
+import { AppointmentQueueLifecycleModule } from '../appointments/appointment-queue-lifecycle.module.js';
 
 @Module({
-  imports: [AuthModule, NotificationsModule, DoctorsModule],
+  imports: [AuthModule, NotificationsModule, DoctorsModule, AppointmentQueueLifecycleModule],
   controllers: [PaymentsController, AdminPaymentsController],
   providers: [
     AuthSessionGuard,
