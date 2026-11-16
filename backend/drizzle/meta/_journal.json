@@ -127,6 +127,27 @@
       "when": 1794666310368,
       "tag": "0017_appointment_idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794824815015,
+      "tag": "0018_staff_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794825836843,
+      "tag": "0019_patient_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794842567530,
+      "tag": "0020_staff_registration",
+      "breakpoints": true
     }
   ]
 }

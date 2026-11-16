@@ -18,6 +18,7 @@ export interface AppEnvironment {
   geminiModel?: string;
   geminiTimeoutMs: number;
   sarvamApiKey?: string;
+  queueNoShowGraceMinutes?: number;
 }
 
 const databaseUrlSchema = z.url().refine((value) => ['postgres:', 'postgresql:'].includes(new URL(value).protocol));
@@ -42,6 +43,7 @@ const environmentSchema = z.object({
   GEMINI_MODEL: z.string().trim().regex(/^gemini-[a-z0-9][a-z0-9.-]*$/).optional(),
   GEMINI_TIMEOUT_MS: z.preprocess((value) => value ?? '20000', z.coerce.number().int().min(1000).max(60000)),
   SARVAM_API_KEY: z.string().trim().min(1).optional(),
+  QUEUE_NO_SHOW_GRACE_MINUTES: z.string().trim().regex(/^\d+$/).transform(Number).pipe(z.number().int().min(0).max(1440)).optional(),
 });
 
 function parseEnvironment(input: unknown): z.infer<typeof environmentSchema> {
@@ -78,5 +80,6 @@ export function loadEnv(): AppEnvironment {
     geminiModel: env.GEMINI_MODEL,
     geminiTimeoutMs: env.GEMINI_TIMEOUT_MS,
     sarvamApiKey: env.SARVAM_API_KEY,
+    queueNoShowGraceMinutes: env.QUEUE_NO_SHOW_GRACE_MINUTES,
   };
 }
