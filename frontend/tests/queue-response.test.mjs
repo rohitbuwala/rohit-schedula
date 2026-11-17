@@ -10,6 +10,14 @@ it("validates attendance and strips fields that do not belong in a patient summa
   assert.equal(ownAttendanceSchema.safeParse({ appointments: [{ ...visit, position: -1 }] }).success, false);
   assert.equal(attendanceSchema.safeParse({ ...visit, timezone: "invalid-zone" }).success, false);
 });
+it("keeps own and serving tokens separate and accepts saved consultation completion", () => {
+  const parsed = attendanceSchema.parse({ ...visit, currentTokenNumber: 3, completedAt: null, patientName: "Private" });
+  assert.equal(parsed.tokenNumber, 8);
+  assert.equal(parsed.currentTokenNumber, 3);
+  assert.equal("patientName" in parsed, false);
+  assert.equal(attendanceSchema.safeParse({ ...visit, currentTokenNumber: 0 }).success, false);
+  assert.equal(attendanceSchema.safeParse({ ...visit, completedAt: "invalid" }).success, false);
+});
 it("parses a scoped daily queue with distinct current, waiting, expected and closed entries", () => {
   const booked = { appointmentId: id, patientName: "Test patient", startsAt: "2026-11-16T04:30:00Z", endsAt: "2026-11-16T04:45:00Z" };
   const queue = { doctorId: "doctor", serviceDate: "2026-11-16", timezone: "Asia/Kolkata", version: 8, current: null,

@@ -6,6 +6,7 @@ export const attendanceSchema = z.object({
   appointmentId: z.uuid(), status: z.enum(["not_checked_in", "waiting", "in_service", "completed", "cancelled", "no_show"]),
   tokenNumber: z.number().int().positive().nullable(), position: z.number().int().positive().nullable(),
   checkedInAt: instant.nullable(), startedAt: instant.nullable(), serviceDate: z.iso.date().nullable(),
+  completedAt: instant.nullable().optional(), currentTokenNumber: z.number().int().positive().nullable().optional(),
   timezone: timezone.nullable(), version: z.number().int().positive().nullable(), queueVersion: z.number().int().nonnegative(),
 });
 export const ownAttendanceSchema = z.object({ appointments: z.array(attendanceSchema) });
@@ -16,9 +17,9 @@ export const queueResponseSchema = z.object({
     serviceDate: z.iso.date(), timezone, status: z.literal("in_service") }).nullable(),
   waiting: z.array(booked.extend({ tokenNumber: z.number().int().positive(), checkedInAt: instant,
     position: z.number().int().positive(), status: z.literal("waiting") })),
-  expected: z.array(booked), waitingCount: z.number().int().nonnegative(),
+  expected: z.array(booked.extend({ tokenNumber: z.number().int().positive().nullable().optional() })), waitingCount: z.number().int().nonnegative(),
   closed: z.array(booked.extend({ tokenNumber: z.number().int().positive().nullable(),
-    status: z.enum(["completed", "cancelled", "no_show"]), terminalAt: instant })).default([]),
+    status: z.enum(["completed", "cancelled", "no_show"]), startedAt: instant.nullable().optional(), terminalAt: instant })).default([]),
   hasMoreWaiting: z.boolean(), hasMoreExpected: z.boolean(), nextCursor: z.string().nullable(),
 });
 export const queueAssignmentsSchema = z.array(z.object({ doctorId: z.string().min(1), name: z.string() }));
@@ -33,6 +34,19 @@ export function localQueueDate(now: Date, zone: string) {
 export function queueTimeRange(startsAt: string, endsAt: string, zone: string) {
   const format = new Intl.DateTimeFormat("en-IN", { timeZone: zone, hour: "numeric", minute: "2-digit" });
   return `${format.format(new Date(startsAt))} – ${format.format(new Date(endsAt))}`;
+}
+
+export function consultationDuration(startedAt: string, endedAt: string | number) {
+  const elapsed = (typeof endedAt === "number" ? endedAt : Date.parse(endedAt)) - Date.parse(startedAt);
+  if (!Number.isFinite(elapsed) || elapsed < 0) return "Unavailable";
+  const seconds = Math.floor(elapsed / 1000);
+  return `${Math.floor(seconds / 60)} min ${seconds % 60} sec`;
+}
+
+export function matchesQueueSearch(patient: { patientName: string; tokenNumber?: number | null }, search: string) {
+  const query = search.trim().toLocaleLowerCase();
+  return !query || patient.patientName.toLocaleLowerCase().includes(query) ||
+    (patient.tokenNumber != null && String(patient.tokenNumber) === query.replace(/^#/, ""));
 }
 type BookingStatus = "scheduled" | "pending_payment" | "completed" | "cancelled";
 export function visitStatus(bookingStatus: BookingStatus, attendance?: Attendance) {

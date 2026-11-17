@@ -162,15 +162,6 @@ export function DoctorAppointments() {
   const [queueTimezone, setQueueTimezone] = useState("Asia/Kolkata");
   useEffect(() => { const timer = window.setInterval(() => setCurrentTime(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
 
-  // Action states
-  const [cancellingId, setCancellingId] = useState<string | null>(null);
-  const [confirmingCancelId, setConfirmingCancelId] = useState<string | null>(null);
-
-  const [completingId, setCompletingId] = useState<string | null>(null);
-  const [confirmingCompleteId, setConfirmingCompleteId] = useState<string | null>(null);
-
-  const [actionError, setActionError] = useState("");
-  const [actionNotice, setActionNotice] = useState("");
   const [activeTab, setActiveTab] = useState<"queue" | "upcoming" | "history" | "schedule">("queue");
 
   useEffect(() => {
@@ -215,54 +206,6 @@ export function DoctorAppointments() {
   function handleManualRefresh() {
     setLoading(true);
     setRefreshTrigger((prev) => prev + 1);
-  }
-
-  async function handleConfirmCancel(id: string) {
-    setCancellingId(id);
-    setActionError("");
-    setActionNotice("");
-    try {
-      const response = await fetch(`${backendUrl}/api/appointments/${id}/cancel`, {
-        method: "PATCH",
-        credentials: "include",
-      });
-      if (response.status === 401) throw new Error("Your session expired. Log in again.");
-      if (response.status === 403) throw new Error("You are not authorized to cancel this appointment.");
-      if (response.status === 404) throw new Error("Appointment not found or you do not have permission.");
-      if (response.status === 409) throw new Error("This appointment is no longer scheduled or was already cancelled.");
-      if (!response.ok) throw new Error("Could not cancel the appointment. Please try again.");
-      setActionNotice("Appointment was successfully cancelled and slot released.");
-      setConfirmingCancelId(null);
-      handleManualRefresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not cancel the appointment.");
-    } finally {
-      setCancellingId(null);
-    }
-  }
-
-  async function handleConfirmComplete(id: string) {
-    setCompletingId(id);
-    setActionError("");
-    setActionNotice("");
-    try {
-      const response = await fetch(`${backendUrl}/api/appointments/${id}/complete`, {
-        method: "PATCH",
-        credentials: "include",
-      });
-      if (response.status === 401) throw new Error("Your session expired. Log in again.");
-      if (response.status === 403) throw new Error("You are not authorized to complete this appointment.");
-      if (response.status === 404) throw new Error("Appointment not found or you do not have permission.");
-      if (response.status === 409) throw new Error("This appointment cannot be completed (it may already be completed or cancelled).");
-      if (!response.ok) throw new Error("Could not complete the appointment. Please try again.");
-      setActionNotice("Consultation successfully marked as completed.");
-      setConfirmingCompleteId(null);
-      handleManualRefresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Could not complete the appointment.");
-    } finally {
-      setCompletingId(null);
-    }
   }
 
   // Match the daily queue's configured local date.
@@ -340,18 +283,6 @@ export function DoctorAppointments() {
           <p className="text-[11px] text-slate-500">Open appointments</p>
         </div>
       </div>
-
-      {/* Action feedback banners */}
-      {actionNotice && (
-        <div role="status" className="rounded-xl bg-emerald-50 p-4 text-xs font-medium text-emerald-800 border border-emerald-200">
-          {actionNotice}
-        </div>
-      )}
-      {actionError && (
-        <div role="alert" className="rounded-xl bg-red-50 p-4 text-xs font-medium text-red-700 border border-red-200">
-          {actionError}
-        </div>
-      )}
 
       {/* Main Workspace Tabs */}
       <div className="rounded-2xl border border-slate-200 bg-white shadow-xs">
@@ -470,24 +401,6 @@ export function DoctorAppointments() {
                           key={appt.id}
                           appointment={appt}
                           timezone={queueTimezone}
-                          isConfirmingCancel={confirmingCancelId === appt.id}
-                          isCancelling={cancellingId === appt.id}
-                          isConfirmingComplete={confirmingCompleteId === appt.id}
-                          isCompleting={completingId === appt.id}
-                          onStartCancel={() => {
-                            setConfirmingCancelId(appt.id);
-                            setConfirmingCompleteId(null);
-                            setActionError("");
-                          }}
-                          onCancelConfirm={() => void handleConfirmCancel(appt.id)}
-                          onCancelDismiss={() => setConfirmingCancelId(null)}
-                          onStartComplete={() => {
-                            setConfirmingCompleteId(appt.id);
-                            setConfirmingCancelId(null);
-                            setActionError("");
-                          }}
-                          onCompleteConfirm={() => void handleConfirmComplete(appt.id)}
-                          onCompleteDismiss={() => setConfirmingCompleteId(null)}
                         />
                       ))}
                     </div>
@@ -548,29 +461,10 @@ function DoctorAppointmentCard({
   appointment,
   timezone,
   isPast = false,
-  isConfirmingCancel = false,
-  isCancelling = false,
-  isConfirmingComplete = false,
-  isCompleting = false,
-  onStartCancel,
-  onCancelConfirm,
-  onCancelDismiss,
-  onCompleteConfirm,
-  onCompleteDismiss,
 }: {
   appointment: DoctorAppointment;
   timezone: string;
   isPast?: boolean;
-  isConfirmingCancel?: boolean;
-  isCancelling?: boolean;
-  isConfirmingComplete?: boolean;
-  isCompleting?: boolean;
-  onStartCancel?: () => void;
-  onCancelConfirm?: () => void;
-  onCancelDismiss?: () => void;
-  onStartComplete?: () => void;
-  onCompleteConfirm?: () => void;
-  onCompleteDismiss?: () => void;
 }) {
   return (
     <div
@@ -627,91 +521,7 @@ function DoctorAppointmentCard({
         )}
       </dl>
 
-      {!isPast && appointment.status === "scheduled" && (
-        <div className="mt-4 border-t border-slate-100 pt-3 space-y-2">
-          {/* Complete confirmation dialog */}
-          {isConfirmingComplete && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 space-y-2">
-              <p className="text-xs font-bold text-emerald-900">
-                Mark consultation as completed?
-              </p>
-              <p className="text-[11px] text-emerald-800">
-                This indicates the consultation session with {appointment.patient.name} has concluded.
-              </p>
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-7 text-xs bg-emerald-700 text-white hover:bg-emerald-800"
-                  disabled={isCompleting}
-                  onClick={onCompleteConfirm}
-                >
-                  {isCompleting ? "Completing…" : "Confirm complete"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs border-emerald-300"
-                  disabled={isCompleting}
-                  onClick={onCompleteDismiss}
-                >
-                  Back
-                </Button>
-              </div>
-            </div>
-          )}
 
-          {/* Cancel confirmation dialog */}
-          {isConfirmingCancel && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3 space-y-2">
-              <p className="text-xs font-bold text-red-900">
-                Cancel this patient consultation?
-              </p>
-              <p className="text-[11px] text-red-800">
-                This will release the reserved time slot for other bookings.
-              </p>
-              <div className="flex items-center gap-2 pt-1">
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-7 text-xs bg-red-600 text-white hover:bg-red-700"
-                  disabled={isCancelling}
-                  onClick={onCancelConfirm}
-                >
-                  {isCancelling ? "Cancelling…" : "Confirm cancel"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs border-slate-300"
-                  disabled={isCancelling}
-                  onClick={onCancelDismiss}
-                >
-                  Keep
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Normal Action Buttons */}
-          {!isConfirmingCancel && !isConfirmingComplete && (
-            <div className="flex items-center justify-end gap-2">
-
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700"
-                onClick={onStartCancel}
-              >
-                Cancel
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
