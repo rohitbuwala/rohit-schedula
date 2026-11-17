@@ -4,7 +4,7 @@ import { getTableConfig, PgDialect } from 'drizzle-orm/pg-core';
 import { readFileSync } from 'node:fs';
 import { db } from '../db/database.js';
 import { appointmentAttendance, doctorDailyQueue, schema } from '../db/schema.js';
-import { allocateQueueToken, insertCheckIn, ownAttendanceRows, queueTransaction, readQueuePage, type QueueTransaction } from './appointment-queue-store.js';
+import { allocateQueueToken, reserveBookingToken, insertCheckIn, ownAttendanceRows, queueTransaction, readQueuePage, type QueueTransaction } from './appointment-queue-store.js';
 
 vi.mock('../db/database.js', () => ({ db: { transaction: vi.fn() } }));
 
@@ -57,12 +57,44 @@ describe('queue SQL and database guarantees', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  it('reserves a booking token with the shared atomic counter and does not create attendance', async () => {
+    const now = new Date('2026-11-16T04:00:00Z');
+    results.push([], [{ timezone: 'UTC' }], [], [{ id: 'queue', timezone: 'UTC', serviceDate: '2026-11-17' }], [{ tokenNumber: 12, queueVersion: 4 }], []);
+    const record = { id: 'booking', doctorId: 'doctor', startsAt: new Date('2026-11-17T09:00:00Z') };
+    await expect(reserveBookingToken(tx, record, now)).resolves.toMatchObject({ tokenNumber: 12, queueId: 'queue' });
+    expect(statements.at(-1)!.sql).toContain('insert into "appointment_booking_token"');
+    expect(statements.at(-1)!.params).toContain(12);
+    expect(statements.some(statement => /insert into "appointment_attendance"/.test(statement.sql))).toBe(false);
+  });
+
+  it('keeps the token on payment retries and same-day reschedules', async () => {
+    const startsAt = new Date('2026-11-17T09:00:00Z');
+    const saved = { appointmentId: 'booking', doctorId: 'doctor', queueId: 'queue', serviceDate: '2026-11-17', timezone: 'UTC', tokenNumber: 12, appointmentStartsAt: startsAt };
+    results.push([saved]);
+    await expect(reserveBookingToken(tx, { id: 'booking', doctorId: 'doctor', startsAt }, new Date())).resolves.toMatchObject({ tokenNumber: 12 });
+    expect(statements).toHaveLength(1);
+    results.push([saved], []);
+    await reserveBookingToken(tx, { id: 'booking', doctorId: 'doctor', startsAt: new Date('2026-11-17T10:00:00Z') }, new Date());
+    expect(statements.at(-1)!.sql).toContain('update "appointment_booking_token" set "appointment_starts_at"');
+    expect(statements.some(statement => /update "doctor_daily_queue"/.test(statement.sql))).toBe(false);
+  });
+
+  it('assigns an unused token in the new date when a booking moves to a different service day', async () => {
+    const now = new Date('2026-11-16T04:00:00Z');
+    results.push([{ appointmentId: 'booking', doctorId: 'doctor', queueId: 'old', serviceDate: '2026-11-17', timezone: 'UTC', tokenNumber: 12, appointmentStartsAt: new Date('2026-11-17T09:00:00Z') }],
+      [{ timezone: 'UTC' }], [], [{ id: 'new', timezone: 'UTC', serviceDate: '2026-11-18' }], [{ tokenNumber: 5, queueVersion: 4 }], []);
+    await expect(reserveBookingToken(tx, { id: 'booking', doctorId: 'doctor', startsAt: new Date('2026-11-18T09:00:00Z') }, now))
+      .resolves.toMatchObject({ tokenNumber: 5, queueId: 'new' });
+    expect(statements.at(-1)!.sql).toContain('on conflict ("appointment_id") do update');
+    expect(statements.some(statement => /delete from/i.test(statement.sql))).toBe(false);
+  });
+
   it('calculates positions before pagination with a stable tie-breaker and filters inactive bookings', async () => {
     results.push([], [{ count: 0 }], [], []);
     await readQueuePage(tx, 'doctor', 'queue', new Date('2026-11-16T00:00:00Z'), new Date('2026-11-17T00:00:00Z'), 10, 20);
     const sql = statements[0].sql;
     expect(sql).toContain('row_number() over (partition by');
-    expect(sql).toContain('order by "appointment_attendance"."appointment_starts_at", "appointment_attendance"."checked_in_at", "appointment_attendance"."appointment_id"');
+    expect(sql).toContain('order by "appointment_attendance"."checked_in_at", "appointment_attendance"."appointment_id"');
     expect(sql).toContain('"appointment"."starts_at" = "appointment_attendance"."appointment_starts_at"');
     expect(statements[0].params).toContain('scheduled'); expect(statements[0].params).toContain('waiting');
     expect(statements[0].params.slice(-2)).toEqual([11, 20]);
@@ -79,6 +111,11 @@ describe('queue SQL and database guarantees', () => {
     expect(statements).toHaveLength(1);
     expect(statements[0].sql).toContain('"appointment"."patient_id" =');
     expect(statements[0].params).toContain('patient-owner');
+    expect(statements[0].sql).toContain('"serving_attendance"."queue_id" = "doctor_daily_queue"."id"');
+    expect(statements[0].sql).toContain('"serving_booking"."starts_at" = "serving_attendance"."appointment_starts_at"');
+    expect(statements[0].params).toContain('in_service');
+    expect(statements[0].params).toContain('scheduled');
+    expect(statements[0].sql).not.toContain('"serving_booking"."patient_id"');
     expect(statements[0].sql).not.toMatch(/"email"|"phone"|"medications"|"payment"/);
   });
 
@@ -109,6 +146,21 @@ describe('queue SQL and database guarantees', () => {
       expect(current.tables['public.appointment_attendance'].checkConstraints[check.name].value.replace(/\r\n/g, '\n')).toBe(sql);
       expect(migration).toContain(sql);
     }
+  });
+
+  it('backfills booking tokens while preserving attendance tokens and advances counters without changing bookings', () => {
+    const migration = readFileSync(new URL('../../drizzle/0021_booking_tokens.sql', import.meta.url), 'utf8');
+    const previous = JSON.parse(readFileSync(new URL('../../drizzle/meta/0020_snapshot.json', import.meta.url), 'utf8'));
+    const current = JSON.parse(readFileSync(new URL('../../drizzle/meta/0021_snapshot.json', import.meta.url), 'utf8'));
+    expect(current.prevId).toBe(previous.id);
+    expect(current.tables['public.appointment']).toEqual(previous.tables['public.appointment']);
+    expect(current.tables['public.payment']).toEqual(previous.tables['public.payment']);
+    expect(current.tables['public.appointment_booking_token'].indexes).toHaveProperty('appointment_booking_token_queue_number_unique');
+    expect(migration).toContain('FROM appointment_attendance WHERE token_number IS NOT NULL');
+    expect(migration.indexOf('LOCK TABLE appointment, appointment_attendance, doctor_daily_queue'))
+      .toBeLessThan(migration.indexOf('INSERT INTO appointment_booking_token'));
+    expect(migration).toContain('greatest(q.next_token_number, issued.highest + 1)');
+    expect(migration).not.toMatch(/\b(?:UPDATE|DELETE FROM|INSERT INTO)\s+"?(?:appointment|appointment_attendance|payment|refund)"?\s/i);
   });
 });
 

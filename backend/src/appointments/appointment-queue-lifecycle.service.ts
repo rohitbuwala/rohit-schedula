@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { appointmentAttendance, appointmentHistory, doctorDailyQueue, doctorProfile, payment } from '../db/schema.js';
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import { queueLocalDate } from './appointment-queue-policy.js';
-import { attendanceForAppointment, bumpQueueVersion, lockDailyQueue, queuesForBooking, queueTimezone, type QueueTransaction, type QueueAttendance } from './appointment-queue-store.js';
+import { attendanceForAppointment, bumpQueueVersion, lockDailyQueue, queuesForBooking, queueTimezone, reserveBookingToken, type QueueTransaction, type QueueAttendance } from './appointment-queue-store.js';
 
 export interface QueueBooking { id: string; doctorId: string; startsAt: Date; status: string }
 
@@ -32,10 +32,14 @@ export class AppointmentQueueLifecycleService {
     }
   }
 
-  async bookingChanged(tx: QueueTransaction, records: QueueBooking[], now = new Date()) {
+  async reserveBookingToken(tx: QueueTransaction, record: QueueBooking, now = new Date()) {
+    return reserveBookingToken(tx, record, now);
+  }
+
+  async bookingChanged(tx: QueueTransaction, records: QueueBooking[], now = new Date(), reserveTokens = true) {
     const buckets = new Map<string, { doctorId: string; date: string; timezone: string }>();
     for (const record of records) {
-      if (record.status !== 'scheduled') continue;
+      if (record.status !== 'scheduled' && record.status !== 'pending_payment') continue;
       const existing = await queuesForBooking(tx, record);
       if (existing.length) {
         for (const queue of existing) buckets.set(`${queue.doctorId}:${queue.serviceDate}`, { doctorId: queue.doctorId, date: queue.serviceDate, timezone: queue.timezone });
@@ -50,12 +54,18 @@ export class AppointmentQueueLifecycleService {
       const queue = await lockDailyQueue(tx, bucket.doctorId, bucket.date, bucket.timezone, now, false);
       await bumpQueueVersion(tx, queue.id, now);
     }
+    if (reserveTokens) {
+      const latest = new Map(records.map(record => [record.id, record]));
+      for (const record of latest.values()) {
+        if (record.status === 'scheduled' || record.status === 'pending_payment') await reserveBookingToken(tx, record, now);
+      }
+    }
   }
 
   private async close(tx: QueueTransaction, record: QueueBooking, status: 'cancelled' | 'completed', actorId: string) {
     const attendance = await attendanceForAppointment(tx, record.id);
     const now = new Date();
-    if (!attendance) { await this.bookingChanged(tx, [record], now); return; }
+    if (!attendance) { await this.bookingChanged(tx, [record], now, false); return; }
     if (attendance.doctorId !== record.doctorId || attendance.appointmentStartsAt.getTime() !== record.startsAt.getTime()) {
       throw new ConflictException({ code: 'QUEUE_ATTENDANCE_STALE', message: 'Attendance no longer matches this booking.' });
     }

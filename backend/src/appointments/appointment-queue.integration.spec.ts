@@ -13,7 +13,7 @@ vi.mock('../auth/auth.js', () => ({ auth: {} }));
 vi.mock('../db/database.js', () => ({ db: {} }));
 vi.mock('./appointment-queue-store.js', () => ({
   queueTransaction: vi.fn(), queueAppointment: vi.fn(), attendanceForAppointment: vi.fn(),
-  queueTimezone: vi.fn(), allocateQueueToken: vi.fn(), insertCheckIn: vi.fn(), ownAttendanceRows: vi.fn(),
+  queueTimezone: vi.fn(), bookingTokenForAppointment: vi.fn(), lockDailyQueue: vi.fn(), bumpQueueVersion: vi.fn(), allocateQueueToken: vi.fn(), insertCheckIn: vi.fn(), ownAttendanceRows: vi.fn(),
   dailyQueue: vi.fn(), readQueuePage: vi.fn(),
 }));
 const id = '00000000-0000-4000-8000-000000000001';
@@ -49,6 +49,9 @@ describe('queue release integration: HTTP → authorization → queue service', 
     vi.mocked(store.queueAppointment).mockImplementation(async (_tx, appointmentId) => appointmentId === id ? booking : undefined);
     vi.mocked(store.attendanceForAppointment).mockImplementation(async () => attendance);
     vi.mocked(store.queueTimezone).mockResolvedValue('Asia/Kolkata');
+    vi.mocked(store.bookingTokenForAppointment).mockResolvedValue({ appointmentId: id, doctorId: 'doctor', queueId: 'queue', appointmentStartsAt: booking.startsAt, tokenNumber: 1, timezone: 'Asia/Kolkata', serviceDate: '2026-11-16' } as never);
+    vi.mocked(store.lockDailyQueue).mockResolvedValue({ id: 'queue' } as never);
+    vi.mocked(store.bumpQueueVersion).mockResolvedValue(8);
     vi.mocked(store.allocateQueueToken).mockResolvedValue({ queue, tokenNumber: 1, queueVersion: 1 } as never);
     vi.mocked(store.insertCheckIn).mockImplementation(async (_tx, value) => { attendance = { ...value, version: 1, startedAt: null } as store.QueueAttendance; });
     vi.mocked(store.ownAttendanceRows).mockImplementation(async (_tx, patientId) => patientId !== 'patient' ? [] : [{
@@ -70,7 +73,7 @@ describe('queue release integration: HTTP → authorization → queue service', 
     const retry = await request(app.getHttpServer()).post(`/api/appointments/${id}/check-in`).send({}).expect(200);
     expect(retry.body).toEqual(first.body);
     expect(first.body).toMatchObject({ status: 'waiting', tokenNumber: 1, position: 1, checkedInAt: now.toISOString(), timezone: 'Asia/Kolkata' });
-    expect(store.allocateQueueToken).toHaveBeenCalledTimes(1);
+    expect(store.allocateQueueToken).not.toHaveBeenCalled();
     expect(store.insertCheckIn).toHaveBeenCalledTimes(1);
     session('patient');
     const own = await request(app.getHttpServer()).get(`/api/queues/mine?appointmentIds=${id}`).expect('Cache-Control', 'no-store').expect(200);

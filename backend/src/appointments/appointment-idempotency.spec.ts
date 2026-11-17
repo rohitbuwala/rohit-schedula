@@ -24,6 +24,22 @@ function transaction(previous: unknown[]) {
 
 describe('appointment idempotency and hold recovery', () => {
   beforeEach(() => { vi.resetAllMocks(); });
+  it('reserves a token in the booking transaction and fails the booking when reservation fails', async () => {
+    const reserveBookingToken = vi.fn().mockResolvedValue({ tokenNumber: 12 });
+    const service = new AppointmentsService({} as never, undefined, undefined, undefined, undefined, undefined, undefined, { reserveBookingToken } as never);
+    vi.spyOn(service as unknown as { findApprovedDoctor: () => Promise<unknown> }, 'findApprovedDoctor').mockResolvedValue({ userId: 'doctor' });
+    vi.spyOn(service as unknown as { lockDoctorCapacity: () => Promise<void> }, 'lockDoctorCapacity').mockResolvedValue(undefined);
+    vi.spyOn(service as unknown as { getCapacityForDate: () => Promise<number> }, 'getCapacityForDate').mockResolvedValue(1);
+    const returning = vi.fn().mockResolvedValue([hold]);
+    const tx = { execute: vi.fn(), select: vi.fn(() => ({ from: () => ({ where: async () => [] }) })),
+      update: vi.fn(() => ({ set: () => ({ where: async () => [] }) })), insert: vi.fn(() => ({ values: () => ({ returning }) })) };
+    mocks.transaction.mockImplementation(async run => run(tx));
+    await expect(service.createForPatient('patient', input)).resolves.toEqual(hold);
+    expect(reserveBookingToken).toHaveBeenCalledWith(tx, { ...hold, doctorId: 'doctor' }, expect.any(Date));
+    expect(returning.mock.invocationCallOrder[0]).toBeLessThan(reserveBookingToken.mock.invocationCallOrder[0]);
+    reserveBookingToken.mockRejectedValueOnce(new Error('token allocation unavailable'));
+    await expect(service.createForPatient('patient', input)).rejects.toThrow('token allocation unavailable');
+  });
   it('returns the committed result on a retry and rejects a changed payload', async () => {
     const { tx } = transaction([{ ...hold, payloadHash: hash() }]);
     const service = new AppointmentsService({} as never);

@@ -6,7 +6,7 @@ import * as store from './appointment-queue-store.js';
 
 vi.mock('./appointment-queue-store.js', () => ({
   queueTransaction: vi.fn(), queueAppointment: vi.fn(), attendanceForAppointment: vi.fn(), queueTimezone: vi.fn(),
-  allocateQueueToken: vi.fn(), insertCheckIn: vi.fn(), ownAttendanceRows: vi.fn(), dailyQueue: vi.fn(), readQueuePage: vi.fn(),
+  bookingTokenForAppointment: vi.fn(), lockDailyQueue: vi.fn(), bumpQueueVersion: vi.fn(), allocateQueueToken: vi.fn(), insertCheckIn: vi.fn(), ownAttendanceRows: vi.fn(), dailyQueue: vi.fn(), readQueuePage: vi.fn(),
   firstWaiting: vi.fn(), currentAttendance: vi.fn(),
 }));
 vi.mock('../config/env.js', () => ({ loadEnv: vi.fn() }));
@@ -33,6 +33,9 @@ describe('queue service boundaries and check-in orchestration', () => {
     vi.mocked(store.queueAppointment).mockResolvedValue(booking);
     vi.mocked(store.attendanceForAppointment).mockResolvedValue(undefined);
     vi.mocked(store.queueTimezone).mockResolvedValue('Asia/Kolkata');
+    vi.mocked(store.bookingTokenForAppointment).mockResolvedValue({ appointmentId: id, doctorId: 'doctor', queueId: 'queue', appointmentStartsAt: booking.startsAt, tokenNumber: 7, timezone: 'Asia/Kolkata', serviceDate: '2026-11-16' } as never);
+    vi.mocked(store.lockDailyQueue).mockResolvedValue({ id: 'queue' } as never);
+    vi.mocked(store.bumpQueueVersion).mockResolvedValue(8);
     vi.mocked(store.allocateQueueToken).mockResolvedValue({ tokenNumber: 7, queueVersion: 7, queue: { id: 'queue' } } as never);
     vi.mocked(store.ownAttendanceRows).mockResolvedValue([{ appointmentId: id, bookingStatus: 'scheduled', attendance,
       position: 2, queue: { serviceDate: '2026-11-16', timezone: 'Asia/Kolkata', version: 7 } }] as never);
@@ -45,13 +48,14 @@ describe('queue service boundaries and check-in orchestration', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('authorizes staff, locks the appointment before allocating, and writes check-in once', async () => {
+  it('authorizes staff and checks in using the existing booking token without allocating', async () => {
     await expect(service.checkIn(staff, id)).resolves.toMatchObject({ tokenNumber: 7, position: 2, version: 1, queueVersion: 7 });
     expect(assigned).toHaveBeenCalledWith(tx, staff, 'doctor');
     expect(store.queueAppointment).toHaveBeenNthCalledWith(2, tx, id, true);
-    expect(vi.mocked(store.queueAppointment).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(store.allocateQueueToken).mock.invocationCallOrder[0]);
+    expect(vi.mocked(store.queueAppointment).mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(store.lockDailyQueue).mock.invocationCallOrder[0]);
     expect(store.insertCheckIn).toHaveBeenCalledWith(tx, expect.objectContaining({ status: 'waiting', tokenNumber: 7, checkedInBy: 'staff', checkedInAt: now }), 'staff', now);
     expect(store.queueTransaction).toHaveBeenCalledWith(expect.any(Function), true);
+    expect(store.allocateQueueToken).not.toHaveBeenCalled();
   });
 
   it('returns the original token/time without allocating or writing on a duplicate, including after midnight', async () => {
@@ -60,6 +64,32 @@ describe('queue service boundaries and check-in orchestration', () => {
     await expect(service.checkIn(doctor, id)).resolves.toMatchObject({ tokenNumber: 7, checkedInAt: now });
     expect(store.allocateQueueToken).not.toHaveBeenCalled(); expect(store.insertCheckIn).not.toHaveBeenCalled();
     expect(store.queueTimezone).not.toHaveBeenCalled();
+  });
+
+  it('never invents a new token at check-in if the booking token is missing or stale', async () => {
+    vi.mocked(store.bookingTokenForAppointment).mockResolvedValueOnce(undefined);
+    await expect(service.checkIn(staff, id)).rejects.toBeInstanceOf(ConflictException);
+    vi.mocked(store.bookingTokenForAppointment).mockResolvedValueOnce({ doctorId: 'doctor', appointmentStartsAt: now } as never);
+    await expect(service.checkIn(staff, id)).rejects.toBeInstanceOf(ConflictException);
+    expect(store.allocateQueueToken).not.toHaveBeenCalled();
+    expect(store.insertCheckIn).not.toHaveBeenCalled();
+  });
+
+  it('shows the reserved booking token before arrival, without assigning a position or check-in time', async () => {
+    vi.mocked(store.ownAttendanceRows).mockResolvedValue([{ appointmentId: id, bookingStatus: 'scheduled',
+      bookingTokenNumber: 12, currentTokenNumber: 4, attendance: null, position: null,
+      queue: { serviceDate: '2026-11-16', timezone: 'Asia/Kolkata', version: 7 } }] as never);
+    await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [
+      { status: 'not_checked_in', tokenNumber: 12, currentTokenNumber: 4, position: null, checkedInAt: null },
+    ] });
+  });
+
+  it('keeps a cancelled unarrived booking closed while preserving its reserved token', async () => {
+    vi.mocked(store.ownAttendanceRows).mockResolvedValue([{ appointmentId: id, bookingStatus: 'cancelled',
+      bookingTokenNumber: 12, currentTokenNumber: 4, attendance: null, position: null, queue: null }] as never);
+    await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [
+      { status: 'cancelled', tokenNumber: 12, currentTokenNumber: null, position: null },
+    ] });
   });
 
   it('rejects non-operational roles, cross-doctor appointments and revoked staff access', async () => {
@@ -109,6 +139,21 @@ describe('queue service boundaries and check-in orchestration', () => {
     await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [{ status: 'not_checked_in', tokenNumber: null, position: null }] });
     vi.mocked(store.ownAttendanceRows).mockResolvedValue([{ appointmentId: id, bookingStatus: 'cancelled', attendance, position: 2, queue: null }] as never);
     await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [{ status: 'cancelled', position: null }] });
+  });
+
+  it('distinguishes the own token from the serving token and exposes saved completion time', async () => {
+    const row = { appointmentId: id, bookingStatus: 'scheduled', attendance, position: 2,
+      currentTokenNumber: 3, queue: { serviceDate: '2026-11-16', timezone: 'Asia/Kolkata', version: 7 } };
+    vi.mocked(store.ownAttendanceRows).mockResolvedValue([row] as never);
+    await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [
+      { tokenNumber: 7, currentTokenNumber: 3, completedAt: null },
+    ] });
+    const terminalAt = new Date('2026-11-16T05:12:00Z');
+    vi.mocked(store.ownAttendanceRows).mockResolvedValue([{ ...row, bookingStatus: 'completed',
+      attendance: { ...attendance, status: 'completed', startedAt: now, terminalAt } }] as never);
+    await expect(service.ownAttendance(patient, [id])).resolves.toMatchObject({ appointments: [
+      { tokenNumber: 7, currentTokenNumber: null, position: null, startedAt: now, completedAt: terminalAt },
+    ] });
   });
 
   it('rejects stale pagination versions and scopes operational reads to the assigned doctor', async () => {
