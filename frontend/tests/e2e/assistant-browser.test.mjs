@@ -131,7 +131,8 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
   const queueStartsAt = new Date().toISOString().slice(0, 10) + 'T14:00:00Z';
   const queueEndsAt = new Date().toISOString().slice(0, 10) + 'T14:15:00Z';
   const queueBooked = { appointmentId: fixtureId, patientName: 'Queue Fixture Patient', startsAt: queueStartsAt, endsAt: queueEndsAt };
-  const queueSummary = () => ({ appointmentId: fixtureId, status: queueStage, tokenNumber: queueStage === 'not_checked_in' ? null : 1,
+  const queueSummary = () => ({ appointmentId: fixtureId, status: queueStage, tokenNumber: 1,
+    currentTokenNumber: queueStage === 'in_service' ? 1 : null,
     position: queueStage === 'waiting' ? 1 : null, checkedInAt: queueStage === 'not_checked_in' ? null : new Date().toISOString(),
     startedAt: ['in_service', 'completed'].includes(queueStage) ? new Date().toISOString() : null,
     serviceDate: queueStartsAt.slice(0, 10), timezone: doctorTimezone, version: queueStage === 'not_checked_in' ? null : queueVersion, queueVersion });
@@ -185,7 +186,7 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
       return json({ doctorId: 'doctor', serviceDate: query.get('date'), timezone: doctorTimezone, version: queueVersion,
         current: queueStage === 'in_service' ? { ...queueBooked, tokenNumber: 1, checkedInAt: new Date().toISOString(), startedAt: new Date().toISOString(), serviceDate: queueStartsAt.slice(0, 10), timezone: doctorTimezone, status: 'in_service' } : null,
         waiting: queueStage === 'waiting' ? [{ ...queueBooked, tokenNumber: 1, position: 1, checkedInAt: new Date().toISOString(), status: 'waiting' }] : [],
-        expected: queueStage === 'not_checked_in' ? [queueBooked] : [],
+        expected: queueStage === 'not_checked_in' ? [{ ...queueBooked, tokenNumber: 1 }] : [],
         closed: queueStage === 'completed' ? [{ ...queueBooked, status: 'completed', tokenNumber: 1, terminalAt: new Date().toISOString() }] : [],
         waitingCount: queueStage === 'waiting' ? 1 : 0, hasMoreWaiting: false, hasMoreExpected: false, nextCursor: null });
     }
@@ -404,6 +405,10 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
 
   await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await visit('patient', '/patient/dashboard');
+  await until(() => hasText('Your token'), 'booking token before arrival');
+  assert.equal(await hasText('Check in at reception'), true);
+  assert.equal(await hasText('Position'), false);
   await visit("doctor", "/doctor/dashboard");
   await click('Check in Queue Fixture Patient');
   await until(() => hasText('Checked in · 1 waiting'), 'checked-in queue patient');
@@ -449,8 +454,24 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
   await until(() => hasText('Staff access enabled.'), 'staff provisioning');
   await click('Assign doctor');
   await until(() => hasText('Active assignment'), 'doctor assignment');
+  queueStage = 'not_checked_in'; queueVersion++;
   await visit('staff', '/staff/dashboard');
   await until(() => hasText('Queue Fixture Patient'), 'assigned staff queue');
+  assert.equal(await hasText('No queue position yet'), true);
+  await evaluate(`document.querySelector('input[type="search"]').focus()`);
+  await send('Input.insertText', { text: '#99' });
+  await until(() => hasText('No matching arrivals'), 'arrival search empty state');
+  await evaluate(`document.querySelector('input[type="search"]').select()`);
+  await send('Input.insertText', { text: '#1' });
+  await until(() => hasText('Queue Fixture Patient'), 'arrival search by booking token');
+  await click('Check in Queue Fixture Patient');
+  await until(() => hasText('Token #1 retained. Queue position 1.'), 'staff check-in receipt');
+  await click('Waiting queue');
+  await until(() => hasText('Queue Fixture Patient'), 'patient moves to waiting view');
+  assert.equal(await hasText('Position'), true);
+  await click('Closed visits');
+  await until(() => hasText('No matching closed visits'), 'closed visits empty state');
+  await click('Waiting queue');
   assert.equal(await evaluate(`document.body.textContent.includes('Clinic staff workspace')`), true);
   assert.equal(await evaluate(`Array.from(document.querySelectorAll('button')).some(b => /Start next patient|Complete consultation|Cancel appointment/.test(b.textContent))`), false);
   await send('Page.navigate', { url: url + '/doctor/dashboard' });

@@ -17,6 +17,7 @@ async function request<T>(path: string, schema: z.ZodType<T> | null, signal?: Ab
       : response.status === 403 ? "You do not have access to this queue."
         : response.status === 404 ? "This appointment or assigned queue is no longer available."
           : code === "QUEUE_NO_SHOW_NOT_CONFIGURED" ? "No-show is unavailable until the clinic configures its grace period."
+            : code === "QUEUE_BOOKING_TOKEN_MISSING" ? "This booking's token is unavailable. Ask the clinic administrator to complete the booking-token update."
             : code === "QUEUE_NO_SHOW_TOO_EARLY" ? "The no-show grace period has not elapsed."
               : response.status === 409 ? "The appointment or queue changed. Refresh and review it before trying again."
                 : "Queue information is temporarily unavailable. Please try again.";

@@ -29,6 +29,8 @@ import { launchRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { AppointmentCheckInStatus } from "@/components/appointment-check-in-status";
+import { useOwnAttendance } from "@/components/use-appointment-queue";
 
 type Doctor = {
   id: string;
@@ -148,6 +150,7 @@ export function PatientBooking({ name, initialSelection, initialHoldId }: { name
   const [paymentStep, setPaymentStep] = useState<PaymentStep>("idle");
   const [paymentError, setPaymentError] = useState("");
   const [bookingConfirmed, setBookingConfirmed] = useState<BookingConfirmed | null>(null);
+  const bookingAttendance = useOwnAttendance(bookingConfirmed ? [bookingConfirmed.appointmentId] : []);
   const [cancellingHold, setCancellingHold] = useState(false);
 
   const [currentTime] = useState(() => Date.now());
@@ -657,6 +660,7 @@ export function PatientBooking({ name, initialSelection, initialHoldId }: { name
       {bookingConfirmed && (
         <Card className="border-emerald-300 bg-gradient-to-br from-emerald-50/80 via-white to-teal-50/60 shadow-md overflow-hidden">
           <CardHeader className="border-b border-emerald-100 bg-emerald-100/40 pb-4">
+              <AppointmentCheckInStatus attendance={bookingAttendance.data[bookingConfirmed.appointmentId]} loading={bookingAttendance.loading} unavailable={!!bookingAttendance.error} />
             <div className="flex items-center gap-2.5">
               <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-xs">
                 <CheckCircle2 className="h-6 w-6" />

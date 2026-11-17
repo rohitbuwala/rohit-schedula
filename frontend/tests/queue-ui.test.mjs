@@ -2,7 +2,24 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { createQueuePoller } from "../lib/queue-api.ts";
-import { attendanceLabel, isUpcomingVisit, localQueueDate, queueTimeRange, visitStatus } from "../lib/queue-response.ts";
+import { attendanceLabel, consultationDuration, isUpcomingVisit, localQueueDate, matchesQueueSearch, queueTimeRange, visitStatus } from "../lib/queue-response.ts";
+
+it("finds an arrival by name or exact booking token without confusing it with position", () => {
+  const patient = { patientName: "Rohit Kumar", tokenNumber: 12, position: 1 };
+  assert.equal(matchesQueueSearch(patient, "  rohIT "), true);
+  assert.equal(matchesQueueSearch(patient, "#12"), true);
+  assert.equal(matchesQueueSearch(patient, "12"), true);
+  assert.equal(matchesQueueSearch(patient, "1"), false);
+  assert.equal(matchesQueueSearch({ patientName: "Test", tokenNumber: null }, "12"), false);
+  assert.equal(matchesQueueSearch(patient, " "), true);
+});
+
+it("measures actual consultation time independently of the booked slot", () => {
+  assert.equal(consultationDuration("2026-11-16T04:35:00Z", "2026-11-16T04:47:09Z"), "12 min 9 sec");
+  assert.equal(consultationDuration("2026-11-16T04:35:00Z", Date.parse("2026-11-16T04:35:30Z")), "0 min 30 sec");
+  assert.equal(consultationDuration("2026-11-16T04:35:00Z", "2026-11-16T04:34:00Z"), "Unavailable");
+  assert.equal(consultationDuration("invalid", Date.now()), "Unavailable");
+});
 
 it("separates stable tokens from positions and keeps delayed active visits out of history", () => {
   const booking = Object.freeze({ status: "scheduled", endsAt: "2026-11-16T04:30:00Z", payment: { status: "captured" } });
