@@ -52,12 +52,17 @@ try {
         : new Date(`${today}T09:${String(index * 15).padStart(2, '0')}:00Z`);
       await tx.execute(sql`insert into appointment (id,patient_id,doctor_id,starts_at,ends_at,status)
         values (${appointmentIds[index]},${patient.id},${doctor.id},${start.toISOString()},${new Date(start.getTime() + 900000).toISOString()},'scheduled')`);
+      await lifecycle.reserveBookingToken(tx, { id: appointmentIds[index], doctorId: doctor.id, startsAt: start, status: 'scheduled' });
     }
   });
   await access.provision(admin, staff.id);
   await access.assign(admin, staff.id, doctor.id);
   assert.equal((await queue.assignments(staff))[0].doctorId, doctor.id);
   check('dedicated staff provisioning and doctor assignment');
+  const beforeArrival = await queue.ownAttendance(patient, appointmentIds);
+  assert.equal(new Set(beforeArrival.appointments.map(row => row.tokenNumber)).size, appointmentIds.length);
+  assert.ok(beforeArrival.appointments.every(row => row.tokenNumber > 0 && row.position === null && row.checkedInAt === null));
+  check('booking assigns tokens before arrival without attendance or queue positions');
 
   const duplicate = await Promise.all(Array.from({ length: 3 }, () => retry(() => queue.checkIn(staff, appointmentIds[0]))));
   assert.equal(new Set(duplicate.map(row => row.tokenNumber)).size, 1);
@@ -67,7 +72,8 @@ try {
   const read = () => queue.read(doctor, { doctorId: doctor.id, date: today, limit: 50 });
   let view = await read();
   assert.equal(view.waitingCount, 3);
-  assert.deepEqual(view.waiting.map(row => row.appointmentId), appointmentIds.slice(0, 3));
+  assert.equal(view.waiting[0].appointmentId, appointmentIds[0]);
+  assert.deepEqual(new Set(view.waiting.map(row => row.appointmentId)), new Set(appointmentIds.slice(0, 3)));
   assert.deepEqual(view.waiting.map(row => row.position), [1, 2, 3]);
   check('real PostgreSQL duplicate and distinct concurrent check-ins, token uniqueness and ordering');
   const own = await queue.ownAttendance(patient, appointmentIds.slice(0, 3));
@@ -98,14 +104,14 @@ try {
   process.env.QUEUE_NO_SHOW_GRACE_MINUTES = String(grace);
   await assert.rejects(queue.noShow(staff, appointmentIds[4], {}), error => error.getStatus?.() === 409);
   const absent = await queue.noShow(staff, appointmentIds[3], {});
-  assert.equal(absent.status, 'no_show'); assert.equal(absent.tokenNumber, null);
+  assert.equal(absent.status, 'no_show'); assert.equal(absent.tokenNumber, 4);
   const repeated = await queue.noShow(staff, appointmentIds[3], {});
   assert.equal(repeated.version, absent.version);
   const untouched = await pool.query('select status from appointment where id=$1', [appointmentIds[3]]);
   assert.equal(untouched.rows[0].status, 'scheduled');
-  check(`no-show denied before ${grace} minutes; allowed afterward without token, cancellation or duplicate attendance`);
+  check(`no-show denied before ${grace} minutes; allowed afterward retaining booking token without cancellation or duplicate attendance`);
   const counters = await pool.query('select next_token_number from doctor_daily_queue where doctor_id=$1', [doctor.id]);
-  assert.equal(counters.rows[0].next_token_number, 4);
+  assert.equal(counters.rows[0].next_token_number, 6);
   console.log(`Database-backed queue workflow verified on ${target.host}; no external payments/email or real accounts used.`);
 } catch (error) {
   console.error(JSON.stringify({ verificationFailed: true, type: error.constructor?.name,
@@ -120,6 +126,7 @@ try {
       await client.query('BEGIN');
       await client.query('delete from appointment_history where appointment_id=any($1::text[])', [appointmentIds]);
       await client.query('delete from appointment_attendance where appointment_id=any($1::text[])', [appointmentIds]);
+      await client.query('delete from appointment_booking_token where appointment_id=any($1::text[])', [appointmentIds]);
       await client.query('delete from doctor_daily_queue where doctor_id=$1', [doctor.id]);
       await client.query('delete from appointment where id=any($1::text[])', [appointmentIds]);
       await client.query('delete from staff_doctor_assignment where staff_id=$1', [staff.id]);

@@ -1,9 +1,11 @@
 import { ConflictException, HttpException, InternalServerErrorException } from '@nestjs/common';
 import { and, asc, eq, getTableColumns, gte, inArray, isNull, lt, sql, type SQL } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
+import { alias } from 'drizzle-orm/pg-core';
 import { setTimeout as pause } from 'node:timers/promises';
 import { db } from '../db/database.js';
-import { appointment, appointmentAttendance, appointmentHistory, doctorAvailability, doctorDailyQueue, user } from '../db/schema.js';
+import { appointment, appointmentAttendance, appointmentBookingToken, appointmentHistory, doctorAvailability, doctorDailyQueue, user } from '../db/schema.js';
+import { queueLocalDate } from './appointment-queue-policy.js';
 import { DEFAULT_TIMEZONE } from './appointment-availability.js';
 
 export type QueueTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -99,6 +101,32 @@ export async function insertCheckIn(tx: QueueTransaction, values: typeof appoint
     actorId, action: 'checked_in', createdAt: now });
 }
 
+export async function bookingTokenForAppointment(tx: QueueTransaction, id: string) {
+  const [token] = await tx.select({ ...getTableColumns(appointmentBookingToken),
+    serviceDate: doctorDailyQueue.serviceDate, timezone: doctorDailyQueue.timezone,
+  }).from(appointmentBookingToken).innerJoin(doctorDailyQueue, eq(doctorDailyQueue.id, appointmentBookingToken.queueId))
+    .where(eq(appointmentBookingToken.appointmentId, id)).limit(1);
+  return token;
+}
+
+// Caller holds the booking/profile lock. Payment retries keep the same token;
+// rescheduling within a service date keeps it too. A new date gets a new token.
+export async function reserveBookingToken(tx: QueueTransaction, record: { id: string; doctorId: string; startsAt: Date }, now: Date) {
+  const existing = await bookingTokenForAppointment(tx, record.id);
+  if (existing?.doctorId === record.doctorId && existing.serviceDate === queueLocalDate(record.startsAt, existing.timezone)) {
+    if (existing.appointmentStartsAt.getTime() !== record.startsAt.getTime()) {
+      await tx.update(appointmentBookingToken).set({ appointmentStartsAt: record.startsAt }).where(eq(appointmentBookingToken.appointmentId, record.id));
+    }
+    return existing;
+  }
+  const timezone = await queueTimezone(tx, record.doctorId);
+  const allocated = await allocateQueueToken(tx, record.doctorId, queueLocalDate(record.startsAt, timezone), timezone, now);
+  const values = { appointmentId: record.id, doctorId: record.doctorId, queueId: allocated.queue.id,
+    appointmentStartsAt: record.startsAt, tokenNumber: allocated.tokenNumber, createdAt: now };
+  await tx.insert(appointmentBookingToken).values(values).onConflictDoUpdate({ target: appointmentBookingToken.appointmentId, set: values });
+  return { ...values, serviceDate: allocated.queue.serviceDate, timezone: allocated.queue.timezone };
+}
+
 // All queue reads join the authoritative booking. Before PR-3 lifecycle wiring,
 // cancelled/completed/rescheduled bookings must never remain in the live queue.
 const matchingBooking = and(eq(appointment.id, appointmentAttendance.appointmentId),
@@ -108,7 +136,7 @@ const liveWaiting = and(eq(appointmentAttendance.status, 'waiting'), eq(appointm
 export async function firstWaiting(tx: QueueTransaction, queueId: string) {
   const [record] = await tx.select({ appointmentId: appointment.id }).from(appointmentAttendance)
     .innerJoin(appointment, matchingBooking).where(and(liveWaiting, eq(appointmentAttendance.queueId, queueId)))
-    .orderBy(asc(appointment.startsAt), asc(appointmentAttendance.checkedInAt), asc(appointment.id)).limit(1);
+    .orderBy(asc(appointmentAttendance.checkedInAt), asc(appointment.id)).limit(1);
   return record;
 }
 
@@ -120,7 +148,7 @@ export async function currentAttendance(tx: QueueTransaction, doctorId: string) 
 
 function rankedWaiting(tx: QueueTransaction, scope: SQL | undefined) {
   return tx.select({ appointmentId: appointmentAttendance.appointmentId,
-    position: sql<number>`row_number() over (partition by ${appointmentAttendance.queueId} order by ${appointmentAttendance.appointmentStartsAt}, ${appointmentAttendance.checkedInAt}, ${appointmentAttendance.appointmentId})`.mapWith(Number).as('position'),
+    position: sql<number>`row_number() over (partition by ${appointmentAttendance.queueId} order by ${appointmentAttendance.checkedInAt}, ${appointmentAttendance.appointmentId})`.mapWith(Number).as('position'),
   }).from(appointmentAttendance).innerJoin(appointment, matchingBooking).where(and(liveWaiting, scope)).as('ranked_waiting');
 }
 
@@ -128,11 +156,22 @@ export async function ownAttendanceRows(tx: QueueTransaction, patientId: string,
   const relevantQueues = tx.select({ queueId: appointmentAttendance.queueId }).from(appointmentAttendance)
     .innerJoin(appointment, matchingBooking).where(and(eq(appointment.patientId, patientId), inArray(appointment.id, ids)));
   const ranked = rankedWaiting(tx, inArray(appointmentAttendance.queueId, relevantQueues));
+  const serving = alias(appointmentAttendance, 'serving_attendance');
+  const servingBooking = alias(appointment, 'serving_booking');
+  const servingToken = tx.select({ token: serving.tokenNumber }).from(serving)
+    .innerJoin(servingBooking, and(eq(servingBooking.id, serving.appointmentId),
+      eq(servingBooking.doctorId, serving.doctorId), eq(servingBooking.startsAt, serving.appointmentStartsAt)))
+    .where(and(eq(serving.queueId, doctorDailyQueue.id), eq(serving.status, 'in_service'),
+      eq(servingBooking.status, 'scheduled'))).limit(1);
   return tx.select({ appointmentId: appointment.id, bookingStatus: appointment.status,
+    bookingTokenNumber: appointmentBookingToken.tokenNumber,
+    currentTokenNumber: sql<number | null>`(${servingToken})`.mapWith(Number),
     attendance: getTableColumns(appointmentAttendance), position: ranked.position,
     queue: { serviceDate: doctorDailyQueue.serviceDate, timezone: doctorDailyQueue.timezone, version: doctorDailyQueue.version },
   }).from(appointment).leftJoin(appointmentAttendance, matchingBooking)
-    .leftJoin(doctorDailyQueue, eq(doctorDailyQueue.id, appointmentAttendance.queueId))
+    .leftJoin(appointmentBookingToken, and(eq(appointmentBookingToken.appointmentId, appointment.id),
+      eq(appointmentBookingToken.doctorId, appointment.doctorId), eq(appointmentBookingToken.appointmentStartsAt, appointment.startsAt)))
+    .leftJoin(doctorDailyQueue, eq(doctorDailyQueue.id, sql`coalesce(${appointmentAttendance.queueId}, ${appointmentBookingToken.queueId})`))
     .leftJoin(ranked, eq(ranked.appointmentId, appointment.id))
     .where(and(eq(appointment.patientId, patientId), inArray(appointment.id, ids))).orderBy(asc(appointment.id));
 }
@@ -145,7 +184,7 @@ export async function readQueuePage(tx: QueueTransaction, doctorId: string, queu
     checkedInAt: appointmentAttendance.checkedInAt, status: appointmentAttendance.status, position: ranked.position,
   }).from(appointmentAttendance).innerJoin(appointment, matchingBooking).innerJoin(user, eq(user.id, appointment.patientId))
     .innerJoin(ranked, eq(ranked.appointmentId, appointment.id)).where(waitingPredicate)
-    .orderBy(asc(appointment.startsAt), asc(appointmentAttendance.checkedInAt), asc(appointment.id)).limit(limit + 1).offset(offset);
+    .orderBy(asc(appointmentAttendance.checkedInAt), asc(appointment.id)).limit(limit + 1).offset(offset);
   const [count] = await tx.select({ count: sql<number>`count(*)`.mapWith(Number) }).from(appointmentAttendance)
     .innerJoin(appointment, matchingBooking).where(waitingPredicate);
   const current = await tx.select({ appointmentId: appointment.id, patientName: user.name,
@@ -156,15 +195,20 @@ export async function readQueuePage(tx: QueueTransaction, doctorId: string, queu
     .innerJoin(doctorDailyQueue, eq(doctorDailyQueue.id, appointmentAttendance.queueId))
     .where(and(eq(appointmentAttendance.doctorId, doctorId), eq(appointmentAttendance.status, 'in_service'), eq(appointment.status, 'scheduled'))).limit(1);
   const expected = await tx.select({ appointmentId: appointment.id, patientName: user.name,
-    startsAt: appointment.startsAt, endsAt: appointment.endsAt,
+    startsAt: appointment.startsAt, endsAt: appointment.endsAt, tokenNumber: appointmentBookingToken.tokenNumber,
   }).from(appointment).innerJoin(user, eq(user.id, appointment.patientId)).leftJoin(appointmentAttendance, matchingBooking)
+    .leftJoin(appointmentBookingToken, and(eq(appointmentBookingToken.appointmentId, appointment.id),
+      eq(appointmentBookingToken.doctorId, appointment.doctorId), eq(appointmentBookingToken.appointmentStartsAt, appointment.startsAt)))
     .where(and(eq(appointment.doctorId, doctorId), eq(appointment.status, 'scheduled'),
       gte(appointment.startsAt, start), lt(appointment.startsAt, end), isNull(appointmentAttendance.appointmentId)))
     .orderBy(asc(appointment.startsAt), asc(appointment.id)).limit(limit + 1).offset(offset);
   const closed = await tx.select({ appointmentId: appointment.id, patientName: user.name,
-    startsAt: appointment.startsAt, endsAt: appointment.endsAt, tokenNumber: appointmentAttendance.tokenNumber,
-    status: appointmentAttendance.status, terminalAt: appointmentAttendance.terminalAt,
+    startsAt: appointment.startsAt, endsAt: appointment.endsAt,
+    tokenNumber: sql<number | null>`coalesce(${appointmentAttendance.tokenNumber}, ${appointmentBookingToken.tokenNumber})`.mapWith(Number),
+    status: appointmentAttendance.status, startedAt: appointmentAttendance.startedAt, terminalAt: appointmentAttendance.terminalAt,
   }).from(appointmentAttendance).innerJoin(appointment, matchingBooking).innerJoin(user, eq(user.id, appointment.patientId))
+    .leftJoin(appointmentBookingToken, and(eq(appointmentBookingToken.appointmentId, appointment.id),
+      eq(appointmentBookingToken.doctorId, appointment.doctorId), eq(appointmentBookingToken.appointmentStartsAt, appointment.startsAt)))
     .where(and(eq(appointmentAttendance.queueId, queueId ?? ''), inArray(appointmentAttendance.status, ['completed', 'cancelled', 'no_show'])))
     .orderBy(asc(appointment.startsAt), asc(appointment.id)).limit(limit + 1).offset(offset);
   return { waiting, waitingCount: count?.count ?? 0, current: current[0] ?? null, expected, closed };

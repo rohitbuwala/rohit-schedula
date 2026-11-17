@@ -409,6 +409,7 @@ export class AppointmentsService {
             status: appointment.status,
             holdExpiresAt: appointment.holdExpiresAt,
           });
+          await this.queueLifecycle?.reserveBookingToken(tx, { ...created, doctorId: doctor.userId }, now);
           return created;
         },
       );

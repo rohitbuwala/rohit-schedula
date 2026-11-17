@@ -13,7 +13,7 @@ import * as store from './appointment-queue-store.js';
 vi.mock('../auth/auth.js', () => ({ auth: {} }));
 vi.mock('../db/database.js', () => ({ db: { transaction: vi.fn() } }));
 vi.mock('./appointment-queue-store.js', async importOriginal => ({
-  ...await importOriginal<typeof store>(), attendanceForAppointment: vi.fn(), bumpQueueVersion: vi.fn(), lockDailyQueue: vi.fn(), queueTimezone: vi.fn(), queuesForBooking: vi.fn(),
+  ...await importOriginal<typeof store>(), reserveBookingToken: vi.fn(), attendanceForAppointment: vi.fn(), bumpQueueVersion: vi.fn(), lockDailyQueue: vi.fn(), queueTimezone: vi.fn(), queuesForBooking: vi.fn(),
 }));
 const now = new Date('2026-11-16T05:00:00Z');
 const booking = { id: 'appointment', patientId: 'patient', doctorId: 'doctor', status: 'scheduled' as const,
@@ -64,18 +64,20 @@ describe('transactional queue lifecycle', () => {
     expect(tx.update).not.toHaveBeenCalled();
   });
 
-  it('versions both affected dates in deterministic order without allocating tokens', async () => {
+  it('versions affected dates in deterministic order and reserves the final booking only once', async () => {
     const later = { ...booking, startsAt: new Date('2026-11-17T04:00:00Z') };
     await lifecycle.bookingChanged(tx as never, [later, booking, later], now);
     expect(store.lockDailyQueue).toHaveBeenNthCalledWith(1, tx, 'doctor', '2026-11-16', 'UTC', now, false);
     expect(store.lockDailyQueue).toHaveBeenNthCalledWith(2, tx, 'doctor', '2026-11-17', 'UTC', now, false);
     expect(store.bumpQueueVersion).toHaveBeenCalledTimes(2);
+    expect(store.reserveBookingToken).toHaveBeenCalledExactlyOnceWith(tx, later, now);
     expect(tx.insert).not.toHaveBeenCalled();
   });
 
-  it('ignores unpaid holds when calculating expected arrivals', async () => {
+  it('reserves a token for an unpaid hold without checking the patient in', async () => {
     await lifecycle.bookingChanged(tx as never, [{ ...booking, status: 'pending_payment' }]);
-    expect(store.lockDailyQueue).not.toHaveBeenCalled();
+    expect(store.reserveBookingToken).toHaveBeenCalledWith(tx, expect.objectContaining({ status: 'pending_payment' }), now);
+    expect(tx.insert).not.toHaveBeenCalled();
   });
 
   it('versions the existing frozen timezone bucket instead of moving it to the current schedule timezone', async () => {

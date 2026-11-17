@@ -84,10 +84,13 @@ export class AppointmentQueueService {
 
   private summary(row: Awaited<ReturnType<typeof store.ownAttendanceRows>>[number]) {
     const attendance = row.attendance;
-    const status = attendance ? (row.bookingStatus === 'cancelled' || row.bookingStatus === 'completed' ? row.bookingStatus : attendance.status) : 'not_checked_in';
-    return { appointmentId: row.appointmentId, status, tokenNumber: attendance?.tokenNumber ?? null,
+    const status = row.bookingStatus === 'cancelled' || row.bookingStatus === 'completed'
+      ? row.bookingStatus : attendance?.status ?? 'not_checked_in';
+    return { appointmentId: row.appointmentId, status, tokenNumber: attendance?.tokenNumber ?? row.bookingTokenNumber ?? null,
       position: status === 'waiting' ? row.position : null,
       checkedInAt: attendance?.checkedInAt ?? null, startedAt: attendance?.startedAt ?? null,
+      completedAt: status === 'completed' ? attendance?.terminalAt ?? null : null,
+      currentTokenNumber: status === 'waiting' || status === 'in_service' || status === 'not_checked_in' ? row.currentTokenNumber ?? null : null,
       serviceDate: row.queue?.serviceDate ?? null, timezone: row.queue?.timezone ?? null,
       version: attendance?.version ?? null, queueVersion: row.queue?.version ?? 0 };
   }
@@ -112,14 +115,20 @@ export class AppointmentQueueService {
         const [row] = await store.ownAttendanceRows(tx, record.patientId, [appointmentId]);
         return this.summary(row);
       }
-      const timezone = await store.queueTimezone(tx, record.doctorId);
+      const token = await store.bookingTokenForAppointment(tx, appointmentId);
+      if (!token || token.doctorId !== record.doctorId || token.appointmentStartsAt.getTime() !== record.startsAt.getTime()) {
+        throw new ConflictException({ code: 'QUEUE_BOOKING_TOKEN_MISSING', message: 'The booking token is unavailable. Ask the clinic to verify its queue migration.' });
+      }
+      const timezone = token.timezone;
       const now = new Date();
       assertCheckInEligible(record, timezone, now);
       const serviceDate = queueLocalDate(record.startsAt, timezone);
       // Appointment lock is held BEFORE obtaining the queue lock. Never reverse it.
-      const allocated = await store.allocateQueueToken(tx, record.doctorId, serviceDate, timezone, now);
-      await store.insertCheckIn(tx, { appointmentId, doctorId: record.doctorId, queueId: allocated.queue.id,
-        appointmentStartsAt: record.startsAt, status: 'waiting', tokenNumber: allocated.tokenNumber,
+      const queue = await store.lockDailyQueue(tx, record.doctorId, serviceDate, timezone, now);
+      if (queue.id !== token.queueId) throw new ConflictException('The booking token does not match this queue.');
+      await store.bumpQueueVersion(tx, queue.id, now);
+      await store.insertCheckIn(tx, { appointmentId, doctorId: record.doctorId, queueId: token.queueId,
+        appointmentStartsAt: record.startsAt, status: 'waiting', tokenNumber: token.tokenNumber,
         checkedInAt: now, checkedInBy: actor.id, createdAt: now, updatedAt: now }, actor.id, now);
       const [row] = await store.ownAttendanceRows(tx, record.patientId, [appointmentId]);
       return this.summary(row);
