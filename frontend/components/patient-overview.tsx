@@ -26,6 +26,9 @@ import {
   type PatientAppointment,
 } from "@/lib/appointment-response";
 import type { InAppNotification } from "@/components/notifications-bell";
+import { useOwnAttendance } from "@/components/use-appointment-queue";
+import { AppointmentCheckInStatus } from "@/components/appointment-check-in-status";
+import { isUpcomingVisit, visitStatus } from "@/lib/queue-response";
 import { PatientAppointments } from "@/components/patient-appointments";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -110,22 +113,25 @@ export function PatientOverview({ name, assistant }: PatientOverviewProps) {
     };
   }, [refreshKey]);
 
+  const attendance = useOwnAttendance(appointments.map(item => item.id));
+
   // Derived metrics
-  const [currentTime] = useState(() => Date.now());
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setCurrentTime(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
 
   const upcomingAppointments = useMemo(() => {
     return appointments
-      .filter((a) => a.status === "scheduled" && new Date(a.endsAt).getTime() > currentTime)
+      .filter((a) => isUpcomingVisit(a, attendance.data[a.id], currentTime))
       .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
-  }, [appointments, currentTime]);
+  }, [appointments, currentTime, attendance.data]);
 
   const completedCount = useMemo(() => {
-    return appointments.filter((a) => a.status === "completed").length;
-  }, [appointments]);
+    return appointments.filter((a) => visitStatus(a.status, attendance.data[a.id]) === "completed").length;
+  }, [appointments, attendance.data]);
 
   const cancelledCount = useMemo(() => {
-    return appointments.filter((a) => a.status === "cancelled").length;
-  }, [appointments]);
+    return appointments.filter((a) => visitStatus(a.status, attendance.data[a.id]) === "cancelled").length;
+  }, [appointments, attendance.data]);
 
   const nextAppointment = upcomingAppointments[0] ?? null;
 
@@ -170,6 +176,7 @@ export function PatientOverview({ name, assistant }: PatientOverviewProps) {
 
   return (
     <div className={`mx-auto w-full max-w-6xl space-y-8 px-4 pt-8 sm:px-8 ${assistant ? "pb-[calc(6rem+env(safe-area-inset-bottom))]" : "pb-8"}`}>
+      {attendance.error && <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{attendance.error} Appointment and payment records remain available. <button type="button" className="ml-2 font-semibold underline" onClick={attendance.refresh}>Retry attendance</button></div>}
       {/* Hero Welcome Banner */}
       <div className="relative overflow-hidden rounded-3xl border border-teal-100 bg-gradient-to-br from-teal-900 via-teal-800 to-slate-900 p-6 sm:p-8 text-white shadow-lg">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -356,6 +363,7 @@ export function PatientOverview({ name, assistant }: PatientOverviewProps) {
                     <Calendar className="h-4 w-4 text-teal-700 shrink-0" />
                     {formatDateTime(nextAppointment.startsAt, nextAppointment.endsAt)}
                   </p>
+                  <AppointmentCheckInStatus attendance={attendance.data[nextAppointment.id]} loading={attendance.loading} unavailable={!!attendance.error} />
                   {nextAppointment.doctor.bio && (
                     <p className="text-slate-500 line-clamp-2 pt-1 border-t border-slate-100">
                       {nextAppointment.doctor.bio}
@@ -533,6 +541,7 @@ export function PatientOverview({ name, assistant }: PatientOverviewProps) {
       <div id="appointment-history-section" className="pt-2">
         <PatientAppointments
           refreshKey={refreshKey}
+          attendanceState={attendance}
           onCancelled={() => setRefreshKey((k) => k + 1)}
         />
       </div>

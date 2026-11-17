@@ -21,32 +21,35 @@ import {
   type DoctorAppointment,
 } from "@/lib/appointment-response";
 import { Button } from "@/components/ui/button";
+import { AppointmentQueue } from "@/components/appointment-queue";
+import { localQueueDate } from "@/lib/queue-response";
 
-function formatDate(iso: string): string {
+function formatDate(iso: string, timezone: string): string {
   return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
     year: "numeric",
     month: "short",
     day: "numeric",
-    timeZone: "Asia/Kolkata",
+    timeZone: timezone,
   }).format(new Date(iso));
 }
 
-function formatTime(startsAt: string, endsAt: string): string {
+function formatTime(startsAt: string, endsAt: string, timezone: string): string {
   const start = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "Asia/Kolkata",
+    timeZone: timezone,
   }).format(new Date(startsAt));
   const end = new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "Asia/Kolkata",
+    timeZone: timezone,
   }).format(new Date(endsAt));
-  return `${start} – ${end} IST`;
+  return `${start} – ${end} (${timezone})`;
 }
 
 function AppointmentStatusBadge({ status }: { status: DoctorAppointment["status"] }) {
+  if (status === "pending_payment") return <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800">Awaiting payment</span>;
   if (status === "scheduled") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700 border border-blue-200">
@@ -155,7 +158,9 @@ export function DoctorAppointments() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [currentTime] = useState(() => Date.now());
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const [queueTimezone, setQueueTimezone] = useState("Asia/Kolkata");
+  useEffect(() => { const timer = window.setInterval(() => setCurrentTime(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
 
   // Action states
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -260,22 +265,22 @@ export function DoctorAppointments() {
     }
   }
 
-  // Today's date string in YYYY-MM-DD UTC
-  const todayUtc = useMemo(() => new Date(currentTime).toISOString().slice(0, 10), [currentTime]);
+  // Match the daily queue's configured local date.
+  const todayLocal = useMemo(() => localQueueDate(new Date(currentTime), queueTimezone), [currentTime, queueTimezone]);
 
-  // Today's Queue: Appointments starting today (UTC)
+  // Today's scheduled bookings; attendance is provided by the queue API.
   const todayQueue = useMemo(() => {
     return appointments
-      .filter((a) => a.startsAt.slice(0, 10) === todayUtc)
+      .filter((a) => a.status === "scheduled" && localQueueDate(new Date(a.startsAt), queueTimezone) === todayLocal)
       .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
-  }, [appointments, todayUtc]);
+  }, [appointments, todayLocal, queueTimezone]);
 
   // Upcoming: Future scheduled appointments after today
   const upcomingConsultations = useMemo(() => {
     return appointments
-      .filter((a) => a.status === "scheduled" && a.startsAt.slice(0, 10) > todayUtc)
+      .filter((a) => a.status === "scheduled" && localQueueDate(new Date(a.startsAt), queueTimezone) > todayLocal)
       .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
-  }, [appointments, todayUtc]);
+  }, [appointments, todayLocal, queueTimezone]);
 
   // Past / History: Completed or cancelled, or past dates
   const historyConsultations = useMemo(() => {
@@ -444,48 +449,7 @@ export function DoctorAppointments() {
 
           {!loading && !error && (
             <>
-              {activeTab === "queue" && (
-                <div>
-                  {todayQueue.length === 0 ? (
-                    <div className="py-12 text-center">
-                      <Clock className="h-8 w-8 text-slate-300 mx-auto mb-2" />
-                      <p className="text-sm font-semibold text-slate-800">
-                        No appointments scheduled for today
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        Any consultations booked for today ({todayUtc} UTC) will automatically appear in this queue.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      {todayQueue.map((appt) => (
-                        <DoctorAppointmentCard
-                          key={appt.id}
-                          appointment={appt}
-                          isConfirmingCancel={confirmingCancelId === appt.id}
-                          isCancelling={cancellingId === appt.id}
-                          isConfirmingComplete={confirmingCompleteId === appt.id}
-                          isCompleting={completingId === appt.id}
-                          onStartCancel={() => {
-                            setConfirmingCancelId(appt.id);
-                            setConfirmingCompleteId(null);
-                            setActionError("");
-                          }}
-                          onCancelConfirm={() => void handleConfirmCancel(appt.id)}
-                          onCancelDismiss={() => setConfirmingCancelId(null)}
-                          onStartComplete={() => {
-                            setConfirmingCompleteId(appt.id);
-                            setConfirmingCancelId(null);
-                            setActionError("");
-                          }}
-                          onCompleteConfirm={() => void handleConfirmComplete(appt.id)}
-                          onCompleteDismiss={() => setConfirmingCompleteId(null)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              {activeTab === "queue" && <AppointmentQueue onChanged={() => setRefreshTrigger(value => value + 1)} onTimezoneChange={setQueueTimezone} />}
 
               {activeTab === "upcoming" && (
                 <div>
@@ -505,6 +469,7 @@ export function DoctorAppointments() {
                         <DoctorAppointmentCard
                           key={appt.id}
                           appointment={appt}
+                          timezone={queueTimezone}
                           isConfirmingCancel={confirmingCancelId === appt.id}
                           isCancelling={cancellingId === appt.id}
                           isConfirmingComplete={confirmingCompleteId === appt.id}
@@ -548,6 +513,7 @@ export function DoctorAppointments() {
                         <DoctorAppointmentCard
                           key={appt.id}
                           appointment={appt}
+                          timezone={queueTimezone}
                           isPast
                         />
                       ))}
@@ -580,6 +546,7 @@ export function DoctorAppointments() {
 
 function DoctorAppointmentCard({
   appointment,
+  timezone,
   isPast = false,
   isConfirmingCancel = false,
   isCancelling = false,
@@ -588,11 +555,11 @@ function DoctorAppointmentCard({
   onStartCancel,
   onCancelConfirm,
   onCancelDismiss,
-  onStartComplete,
   onCompleteConfirm,
   onCompleteDismiss,
 }: {
   appointment: DoctorAppointment;
+  timezone: string;
   isPast?: boolean;
   isConfirmingCancel?: boolean;
   isCancelling?: boolean;
@@ -637,7 +604,7 @@ function DoctorAppointmentCard({
             Consultation Date
           </dt>
           <dd className="mt-0.5 font-semibold text-slate-800">
-            {formatDate(appointment.startsAt)}
+            {formatDate(appointment.startsAt, timezone)}
           </dd>
         </div>
         <div>
@@ -645,7 +612,7 @@ function DoctorAppointmentCard({
             Time Window
           </dt>
           <dd className="mt-0.5 font-semibold text-slate-800">
-            {formatTime(appointment.startsAt, appointment.endsAt)}
+            {formatTime(appointment.startsAt, appointment.endsAt, timezone)}
           </dd>
         </div>
         {appointment.payment && (
@@ -731,16 +698,7 @@ function DoctorAppointmentCard({
           {/* Normal Action Buttons */}
           {!isConfirmingCancel && !isConfirmingComplete && (
             <div className="flex items-center justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs border-emerald-300 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 font-semibold"
-                onClick={onStartComplete}
-              >
-                <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                Complete Consultation
-              </Button>
+
               <Button
                 type="button"
                 variant="outline"
