@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { and, asc, eq, inArray, lte } from 'drizzle-orm';
 import { db } from '../db/database.js';
@@ -12,6 +12,7 @@ import {
 } from '../db/schema.js';
 import { AppointmentReminderService } from '../notifications/appointment-reminder.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
+import { AppointmentQueueLifecycleService } from './appointment-queue-lifecycle.service.js';
 
 @Injectable()
 export class AppointmentExpiryService implements OnModuleInit {
@@ -20,6 +21,7 @@ export class AppointmentExpiryService implements OnModuleInit {
   constructor(
     private readonly appointmentReminders?: AppointmentReminderService,
     private readonly scheduleService?: DoctorScheduleService,
+    @Optional() private readonly queueLifecycle?: AppointmentQueueLifecycleService,
   ) {}
 
   async onModuleInit() {
@@ -172,6 +174,8 @@ export class AppointmentExpiryService implements OnModuleInit {
                   updatedAt: scheduledAt,
                 })
                 .where(eq(appointment.id, appt.id));
+
+              await this.queueLifecycle?.bookingChanged(tx, [{ ...appt, startsAt: appt.startsAt ?? candidate.startsAt, status: 'scheduled' }], scheduledAt);
 
               const timezone =
                 (await this.scheduleService?.getTimezoneForDoctor(appt.doctorId)) ?? 'Asia/Kolkata';
