@@ -1,7 +1,7 @@
-import { boolean, check, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { boolean, check, date, foreignKey, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
-export const userRole = pgEnum('user_role', ['patient', 'doctor', 'admin']);
+export const userRole = pgEnum('user_role', ['patient', 'doctor', 'admin', 'staff']);
 export const doctorProfileStatus = pgEnum('doctor_profile_status', ['pending', 'approved', 'rejected']);
 export const appointmentStatus = pgEnum('appointment_status', [
   'pending_payment',
@@ -124,6 +124,31 @@ export const doctorProfile = pgTable('doctor_profile', {
   check('doctor_profile_experience_non_negative_check', sql`${table.yearsOfExperience} is null or ${table.yearsOfExperience} >= 0`),
 ]);
 
+export const staffDoctorAssignment = pgTable('staff_doctor_assignment', {
+  id: text('id').primaryKey(),
+  staffId: text('staff_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  assignedBy: text('assigned_by').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+}, (table) => [
+  uniqueIndex('staff_doctor_assignment_pair_unique').on(table.staffId, table.doctorId),
+  index('staff_doctor_assignment_active_idx').on(table.staffId, table.doctorId).where(sql`${table.revokedAt} is null`),
+  check('staff_doctor_assignment_distinct_check', sql`${table.staffId} <> ${table.doctorId}`),
+  check('staff_doctor_assignment_time_check', sql`${table.revokedAt} is null or ${table.revokedAt} >= ${table.createdAt}`),
+]);
+
+export const staffRegistrationRequest = pgTable('staff_registration_request', {
+  userId: text('user_id').primaryKey().references(() => user.id, { onDelete: 'restrict' }),
+  status: text('status').notNull().default('pending'),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+  reviewedBy: text('reviewed_by').references(() => user.id, { onDelete: 'restrict' }),
+}, table => [
+  check('staff_registration_review_check', sql`(${table.status} = 'pending' and ${table.reviewedAt} is null and ${table.reviewedBy} is null) or (${table.status} = 'approved' and ${table.reviewedAt} is not null and ${table.reviewedBy} is not null)`),
+  index('staff_registration_pending_idx').on(table.requestedAt).where(sql`${table.status} = 'pending'`),
+]);
+
 export const appointment = pgTable('appointment', {
   id: text('id').primaryKey(),
   patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
@@ -148,6 +173,56 @@ export const appointmentPrescription = pgTable('appointment_prescription', {
   issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
   medications: jsonb('medications').$type<Array<{ name: string; instructions: string }>>().notNull(),
 });
+
+export const attendanceStatus = pgEnum('attendance_status', ['waiting', 'in_service', 'completed', 'no_show', 'cancelled']);
+
+export const doctorDailyQueue = pgTable('doctor_daily_queue', {
+  id: text('id').primaryKey(),
+  doctorId: text('doctor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  serviceDate: date('service_date').notNull(),
+  timezone: text('timezone').notNull(),
+  nextTokenNumber: integer('next_token_number').notNull().default(1),
+  version: integer('version').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('doctor_daily_queue_doctor_date_unique').on(table.doctorId, table.serviceDate),
+  uniqueIndex('doctor_daily_queue_id_doctor_unique').on(table.id, table.doctorId),
+  check('doctor_daily_queue_counter_check', sql`${table.nextTokenNumber} > 0 and ${table.version} >= 0`),
+]);
+
+export const appointmentAttendance = pgTable('appointment_attendance', {
+  appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
+  queueId: text('queue_id').notNull(),
+  doctorId: text('doctor_id').notNull(),
+  appointmentStartsAt: timestamp('appointment_starts_at', { withTimezone: true }).notNull(),
+  status: attendanceStatus('status').notNull(),
+  tokenNumber: integer('token_number'),
+  checkedInAt: timestamp('checked_in_at', { withTimezone: true }),
+  checkedInBy: text('checked_in_by').references(() => user.id, { onDelete: 'restrict' }),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  startedBy: text('started_by').references(() => user.id, { onDelete: 'restrict' }),
+  terminalAt: timestamp('terminal_at', { withTimezone: true }),
+  terminalBy: text('terminal_by').references(() => user.id, { onDelete: 'restrict' }),
+  version: integer('version').notNull().default(1),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  foreignKey({ name: 'appointment_attendance_queue_doctor_fk', columns: [table.queueId, table.doctorId], foreignColumns: [doctorDailyQueue.id, doctorDailyQueue.doctorId] }).onDelete('restrict'),
+  uniqueIndex('appointment_attendance_queue_token_unique').on(table.queueId, table.tokenNumber).where(sql`${table.tokenNumber} is not null`),
+  uniqueIndex('appointment_attendance_one_current_doctor_unique').on(table.doctorId).where(sql`${table.status} = 'in_service'`),
+  index('appointment_attendance_waiting_idx').on(table.queueId, table.appointmentStartsAt, table.checkedInAt, table.appointmentId).where(sql`${table.status} = 'waiting'`),
+  check('appointment_attendance_version_check', sql`${table.version} > 0`),
+  check('appointment_attendance_check_in_check', sql`(${table.tokenNumber} is null and ${table.checkedInAt} is null and ${table.checkedInBy} is null) or (${table.tokenNumber} is not null and ${table.tokenNumber} > 0 and ${table.checkedInAt} is not null and ${table.checkedInBy} is not null)`),
+  check('appointment_attendance_actor_pairs_check', sql`(${table.startedAt} is null) = (${table.startedBy} is null) and (${table.terminalAt} is null) = (${table.terminalBy} is null)`),
+  check('appointment_attendance_state_check', sql`
+    (${table.status} = 'waiting' and ${table.checkedInAt} is not null and ${table.startedAt} is null and ${table.terminalAt} is null) or
+    (${table.status} = 'in_service' and ${table.checkedInAt} is not null and ${table.startedAt} is not null and ${table.terminalAt} is null) or
+    (${table.status} = 'completed' and ${table.checkedInAt} is not null and ${table.startedAt} is not null and ${table.terminalAt} is not null) or
+    (${table.status} = 'no_show' and ${table.checkedInAt} is null and ${table.startedAt} is null and ${table.terminalAt} is not null) or
+    (${table.status} = 'cancelled' and ${table.terminalAt} is not null)`),
+  check('appointment_attendance_time_check', sql`(${table.startedAt} is null or (${table.checkedInAt} is not null and ${table.startedAt} >= ${table.checkedInAt})) and (${table.terminalAt} is null or ${table.terminalAt} >= coalesce(${table.startedAt}, ${table.checkedInAt}, ${table.terminalAt}))`),
+]);
 
 export const appointmentIdempotency = pgTable('appointment_idempotency', {
   patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
@@ -422,8 +497,12 @@ export const schema = {
   account,
   verification,
   doctorProfile,
+  staffDoctorAssignment,
+  staffRegistrationRequest,
   appointment,
   appointmentPrescription,
+  doctorDailyQueue,
+  appointmentAttendance,
   appointmentIdempotency,
   patientProfile,
   doctorAvailability,
