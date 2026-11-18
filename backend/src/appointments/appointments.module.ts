@@ -8,11 +8,14 @@ import { PaymentsModule } from '../payments/payments.module.js';
 import { AppointmentsController } from './appointments.controller.js';
 import { AppointmentsService } from './appointments.service.js';
 import { AppointmentExpiryService } from './appointment-expiry.service.js';
+import { AppointmentQueueController } from './appointment-queue.controller.js';
+import { AppointmentQueueService } from './appointment-queue.service.js';
+import { AppointmentQueueLifecycleModule } from './appointment-queue-lifecycle.module.js';
 
 @Module({
-  imports: [AuthModule, DoctorsModule, NotificationsModule, PaymentsModule],
-  controllers: [AppointmentsController],
-  providers: [AuthSessionGuard, RolesGuard, AppointmentsService, AppointmentExpiryService],
+  imports: [AuthModule, DoctorsModule, NotificationsModule, PaymentsModule, AppointmentQueueLifecycleModule],
+  controllers: [AppointmentsController, AppointmentQueueController],
+  providers: [AuthSessionGuard, RolesGuard, AppointmentsService, AppointmentExpiryService, AppointmentQueueService],
   exports: [AppointmentsService, AppointmentExpiryService],
 })
 export class AppointmentsModule {}

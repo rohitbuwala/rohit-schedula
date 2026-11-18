@@ -20,6 +20,7 @@ import type { appointmentBookingSchema } from './appointment-booking.schema.js';
 import type { AppointmentRescheduleInput } from './appointment-reschedule.schema.js';
 import { doctorScheduleUpdateSchema } from '../doctors/doctor-schedule.schema.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { AppointmentQueueLifecycleService } from './appointment-queue-lifecycle.service.js';
 
 type AppointmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -157,6 +158,7 @@ export class AppointmentsService {
     @Optional() private readonly reconciliation?: PaymentReconciliationService,
     @Optional() private readonly emailOutbox?: EmailOutboxService,
     @Optional() private readonly appointmentReminders?: AppointmentReminderService,
+    @Optional() private readonly queueLifecycle?: AppointmentQueueLifecycleService,
   ) {}
 
   private async enqueueAppointmentEmails(
@@ -407,6 +409,7 @@ export class AppointmentsService {
             status: appointment.status,
             holdExpiresAt: appointment.holdExpiresAt,
           });
+          await this.queueLifecycle?.reserveBookingToken(tx, { ...created, doctorId: doctor.userId }, now);
           return created;
         },
       );
@@ -1107,6 +1110,7 @@ export class AppointmentsService {
       }
 
       const durationMs = input.endsAt.getTime() - input.startsAt.getTime();
+      await this.queueLifecycle?.assertReschedulable(tx, record);
       const originalDurationMs = record.endsAt.getTime() - record.startsAt.getTime();
       if (
         durationMs !== originalDurationMs &&
@@ -1163,6 +1167,8 @@ export class AppointmentsService {
         if (!updated) {
           throw new ConflictException('Appointment changed concurrently; please refresh.');
         }
+
+        await this.queueLifecycle?.bookingChanged(tx, [record, updated]);
 
         await this.enqueueAppointmentEmails(
           tx,
@@ -1305,6 +1311,7 @@ export class AppointmentsService {
         || record.endsAt.getTime() !== affected.originalEndsAt.getTime()) {
         throw new ConflictException('The appointment changed before patient consent was recorded.');
       }
+      await this.queueLifecycle?.assertReschedulable(tx, record);
       const [alternative] = await tx.select().from(scheduleChangeAlternative)
         .where(and(eq(scheduleChangeAlternative.id, alternativeId), eq(scheduleChangeAlternative.affectedAppointmentId, affectedAppointmentId)))
         .limit(1);
@@ -1346,6 +1353,7 @@ export class AppointmentsService {
         or(eq(appointment.status, 'scheduled'), eq(appointment.status, 'pending_payment')),
       )).returning();
       if (!updated) throw new ConflictException('Appointment changed concurrently; please refresh.');
+      await this.queueLifecycle?.bookingChanged(tx, [record, updated], now);
       await tx.insert(appointmentHistory).values({
         id: randomUUID(),
         appointmentId: record.id,
@@ -1612,6 +1620,7 @@ export class AppointmentsService {
       }
 
       let paymentIdToRefund: string | null = null;
+      await this.queueLifecycle?.cancelled(tx, record, actor.id);
       let remainingPaise = 0;
 
       if (payRecord) {
@@ -1720,6 +1729,8 @@ export class AppointmentsService {
       if (record.status !== 'scheduled') {
         throw new ConflictException(`Cannot complete an appointment that is ${record.status}.`);
       }
+
+      await this.queueLifecycle?.completed(tx, record, actor.id);
 
       const [updated] = await tx.update(appointment)
         .set({ status: 'completed', updatedAt: new Date() })

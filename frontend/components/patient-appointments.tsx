@@ -23,6 +23,9 @@ import {
 import { launchRazorpayCheckout } from "@/lib/razorpay";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useOwnAttendance } from "@/components/use-appointment-queue";
+import { AppointmentCheckInStatus } from "@/components/appointment-check-in-status";
+import { isUpcomingVisit, visitStatus, type Attendance } from "@/lib/queue-response";
 
 function formatDate(iso: string): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -195,19 +198,28 @@ interface ScheduleChangeRequest {
 export function PatientAppointments({
   refreshKey = 0,
   onCancelled,
+  attendanceState,
 }: {
   refreshKey?: number;
+  attendanceState?: ReturnType<typeof useOwnAttendance>;
   onCancelled?: () => void;
 }) {
   const [appointments, setAppointments] = useState<PatientAppointment[]>([]);
+  const missingAttendance = appointments.filter(item => !attendanceState?.data[item.id]).map(item => item.id);
+  const ownAttendance = useOwnAttendance(missingAttendance, !attendanceState || !attendanceState.loading && !attendanceState.error);
+  const attendance = attendanceState ? { ...attendanceState,
+    data: { ...ownAttendance.data, ...attendanceState.data }, loading: attendanceState.loading || ownAttendance.loading,
+    error: attendanceState.error || ownAttendance.error,
+    refresh: () => { attendanceState.refresh(); ownAttendance.refresh(); },
+  } : ownAttendance;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [currentTime] = useState(() => Date.now());
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
 
   // Search and filter
   const [filterStatus, setFilterStatus] = useState<
-    "all" | "scheduled" | "completed" | "cancelled" | "pending_payment"
+    "all" | "scheduled" | "completed" | "cancelled" | "pending_payment" | "no_show"
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -240,7 +252,7 @@ export function PatientAppointments({
   const [scheduleClock, setScheduleClock] = useState(() => Date.now());
 
   useEffect(() => {
-    const timer = window.setInterval(() => setScheduleClock(Date.now()), 30_000);
+    const timer = window.setInterval(() => { setScheduleClock(Date.now()); setCurrentTime(Date.now()); }, 30_000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -385,6 +397,7 @@ export function PatientAppointments({
   }, [reschedulingId, rescheduleDoctorProfileId, rescheduleDate]);
 
   function handleManualRefresh() {
+    attendance.refresh();
     setLoading(true);
     setScheduleRequestsLoading(true);
     setRefreshTrigger((prev) => prev + 1);
@@ -529,7 +542,7 @@ export function PatientAppointments({
 
   const filteredAppointments = useMemo(() => {
     return appointments.filter((appt) => {
-      const matchesStatus = filterStatus === "all" || appt.status === filterStatus;
+      const matchesStatus = filterStatus === "all" || visitStatus(appt.status, attendance.data[appt.id]) === filterStatus;
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch =
         !q ||
@@ -537,22 +550,18 @@ export function PatientAppointments({
         appt.doctor.specialty.toLowerCase().includes(q);
       return matchesStatus && matchesSearch;
     });
-  }, [appointments, filterStatus, searchQuery]);
+  }, [appointments, filterStatus, searchQuery, attendance.data]);
 
   const pendingPayments = filteredAppointments
     .filter((a) => a.status === "pending_payment" && a.holdExpiresAt && new Date(a.holdExpiresAt).getTime() > currentTime)
     .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
 
   const upcoming = filteredAppointments
-    .filter((a) => a.status === "scheduled" && new Date(a.endsAt).getTime() >= currentTime)
+    .filter((a) => isUpcomingVisit(a, attendance.data[a.id], currentTime))
     .sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
 
   const pastAndOthers = filteredAppointments
-    .filter(
-      (a) =>
-        (a.status !== "scheduled" && !(a.status === "pending_payment" && a.holdExpiresAt && new Date(a.holdExpiresAt).getTime() > currentTime)) ||
-        (a.status === "scheduled" && new Date(a.endsAt).getTime() < currentTime)
-    )
+    .filter(a => !isUpcomingVisit(a, attendance.data[a.id], currentTime) && !(a.status === "pending_payment" && a.holdExpiresAt && Date.parse(a.holdExpiresAt) > currentTime))
     .sort((a, b) => new Date(b.startsAt).getTime() - new Date(a.startsAt).getTime());
 
   return (
@@ -604,6 +613,7 @@ export function PatientAppointments({
         >
           All ({appointments.length})
         </button>
+        <button type="button" onClick={() => setFilterStatus("no_show")} className={`rounded-full border px-3 py-1 text-xs font-semibold ${filterStatus === "no_show" ? "bg-slate-700 text-white" : "bg-white text-slate-600"}`}>Absent ({appointments.filter(a => visitStatus(a.status, attendance.data[a.id]) === "no_show").length})</button>
         <button
           type="button"
           onClick={() => setFilterStatus("pending_payment")}
@@ -624,7 +634,7 @@ export function PatientAppointments({
               : "bg-white border border-slate-200 text-slate-600 hover:text-slate-900"
           }`}
         >
-          Scheduled ({appointments.filter((a) => a.status === "scheduled").length})
+          Scheduled ({appointments.filter((a) => visitStatus(a.status, attendance.data[a.id]) === "scheduled").length})
         </button>
         <button
           type="button"
@@ -635,7 +645,7 @@ export function PatientAppointments({
               : "bg-white border border-slate-200 text-slate-600 hover:text-slate-900"
           }`}
         >
-          Completed ({appointments.filter((a) => a.status === "completed").length})
+          Completed ({appointments.filter((a) => visitStatus(a.status, attendance.data[a.id]) === "completed").length})
         </button>
         <button
           type="button"
@@ -646,7 +656,7 @@ export function PatientAppointments({
               : "bg-white border border-slate-200 text-slate-600 hover:text-slate-900"
           }`}
         >
-          Cancelled ({appointments.filter((a) => a.status === "cancelled").length})
+          Cancelled ({appointments.filter((a) => visitStatus(a.status, attendance.data[a.id]) === "cancelled").length})
         </button>
       </div>
 
@@ -817,6 +827,8 @@ export function PatientAppointments({
                   <AppointmentCard
                     key={appt.id}
                     appointment={appt}
+                    attendance={attendance.data[appt.id]}
+                    attendanceUnavailable={!!attendance.error || attendance.loading}
                     currentTime={currentTime}
                     isPaying={payingId === appt.id}
                     isVerifying={verifyingId === appt.id}
@@ -847,6 +859,8 @@ export function PatientAppointments({
                   <AppointmentCard
                     key={appt.id}
                     appointment={appt}
+                    attendance={attendance.data[appt.id]}
+                    attendanceUnavailable={!!attendance.error || attendance.loading}
                     currentTime={currentTime}
                     isConfirming={confirmingId === appt.id}
                     isCancelling={cancellingId === appt.id}
@@ -891,6 +905,8 @@ export function PatientAppointments({
                   <AppointmentCard
                     key={appt.id}
                     appointment={appt}
+                    attendance={attendance.data[appt.id]}
+                    attendanceUnavailable={!!attendance.error || attendance.loading}
                     currentTime={currentTime}
                     isPast
                     isConfirming={confirmingId === appt.id}
@@ -915,6 +931,8 @@ export function PatientAppointments({
 
 function AppointmentCard({
   appointment,
+  attendance,
+  attendanceUnavailable = false,
   currentTime,
   isPast = false,
   isPaying = false,
@@ -938,6 +956,8 @@ function AppointmentCard({
   onRescheduleDismiss,
 }: {
   appointment: PatientAppointment;
+  attendance?: Attendance;
+  attendanceUnavailable?: boolean;
   currentTime: number;
   isPast?: boolean;
   isPaying?: boolean;
@@ -960,6 +980,7 @@ function AppointmentCard({
   onRescheduleConfirm?: () => void;
   onRescheduleDismiss?: () => void;
 }) {
+  const displayStatus = visitStatus(appointment.status, attendance);
   const isPending = appointment.status === "pending_payment";
   const isExpired = isPending && (!appointment.holdExpiresAt || new Date(appointment.holdExpiresAt).getTime() <= currentTime);
   const isHoldActive = isPending && appointment.holdExpiresAt != null && new Date(appointment.holdExpiresAt).getTime() > currentTime;
@@ -985,11 +1006,12 @@ function AppointmentCard({
           </div>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 items-end">
-          <AppointmentStatusBadge status={appointment.status} isExpired={isExpired} />
+          {displayStatus === "no_show" ? <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">Marked absent</span> : <AppointmentStatusBadge status={displayStatus} isExpired={isExpired} />}
           <PaymentStatusBadge payment={appointment.payment} appointmentStatus={appointment.status} />
         </div>
       </div>
 
+      <AppointmentCheckInStatus attendance={attendance} unavailable={attendanceUnavailable} />
       <dl className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-3 text-xs">
         <div>
           <dt className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Date</dt>
@@ -1288,7 +1310,9 @@ function AppointmentCard({
                 variant="outline"
                 size="sm"
                 className="h-8 text-xs border-blue-200 text-blue-700 hover:bg-blue-50 font-semibold"
-                onClick={onStartReschedule}
+                disabled={attendanceUnavailable || !!attendance && attendance.status !== "not_checked_in"}
+                  title={attendanceUnavailable ? "Refresh attendance before rescheduling" : attendance && attendance.status !== "not_checked_in" ? "Contact clinic staff to review an attended appointment" : undefined}
+                  onClick={onStartReschedule}
               >
                 <RefreshCw className="h-3 w-3 mr-1" />
                 Reschedule

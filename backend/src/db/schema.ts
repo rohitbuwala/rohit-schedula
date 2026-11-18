@@ -191,6 +191,20 @@ export const doctorDailyQueue = pgTable('doctor_daily_queue', {
   check('doctor_daily_queue_counter_check', sql`${table.nextTokenNumber} > 0 and ${table.version} >= 0`),
 ]);
 
+// Booking tokens exist independently of physical arrival and attendance.
+export const appointmentBookingToken = pgTable('appointment_booking_token', {
+  appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
+  queueId: text('queue_id').notNull(),
+  doctorId: text('doctor_id').notNull(),
+  appointmentStartsAt: timestamp('appointment_starts_at', { withTimezone: true }).notNull(),
+  tokenNumber: integer('token_number').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  foreignKey({ name: 'appointment_booking_token_queue_doctor_fk', columns: [table.queueId, table.doctorId], foreignColumns: [doctorDailyQueue.id, doctorDailyQueue.doctorId] }).onDelete('restrict'),
+  uniqueIndex('appointment_booking_token_queue_number_unique').on(table.queueId, table.tokenNumber),
+  check('appointment_booking_token_positive', sql`${table.tokenNumber} > 0`),
+]);
+
 export const appointmentAttendance = pgTable('appointment_attendance', {
   appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
   queueId: text('queue_id').notNull(),
@@ -211,7 +225,7 @@ export const appointmentAttendance = pgTable('appointment_attendance', {
   foreignKey({ name: 'appointment_attendance_queue_doctor_fk', columns: [table.queueId, table.doctorId], foreignColumns: [doctorDailyQueue.id, doctorDailyQueue.doctorId] }).onDelete('restrict'),
   uniqueIndex('appointment_attendance_queue_token_unique').on(table.queueId, table.tokenNumber).where(sql`${table.tokenNumber} is not null`),
   uniqueIndex('appointment_attendance_one_current_doctor_unique').on(table.doctorId).where(sql`${table.status} = 'in_service'`),
-  index('appointment_attendance_waiting_idx').on(table.queueId, table.appointmentStartsAt, table.checkedInAt, table.appointmentId).where(sql`${table.status} = 'waiting'`),
+  index('appointment_attendance_waiting_idx').on(table.queueId, table.checkedInAt, table.appointmentId).where(sql`${table.status} = 'waiting'`),
   check('appointment_attendance_version_check', sql`${table.version} > 0`),
   check('appointment_attendance_check_in_check', sql`(${table.tokenNumber} is null and ${table.checkedInAt} is null and ${table.checkedInBy} is null) or (${table.tokenNumber} is not null and ${table.tokenNumber} > 0 and ${table.checkedInAt} is not null and ${table.checkedInBy} is not null)`),
   check('appointment_attendance_actor_pairs_check', sql`(${table.startedAt} is null) = (${table.startedBy} is null) and (${table.terminalAt} is null) = (${table.terminalBy} is null)`),
@@ -503,6 +517,7 @@ export const schema = {
   appointmentPrescription,
   doctorDailyQueue,
   appointmentAttendance,
+  appointmentBookingToken,
   appointmentIdempotency,
   patientProfile,
   doctorAvailability,

@@ -18,7 +18,7 @@ export default async function SignupPage() {
     <>
       <SiteHeader />
       <main className="flex flex-1 items-center justify-center px-4 py-12 sm:px-6 lg:px-8">
-        <div className="w-full max-w-4xl space-y-8">
+        <div className="w-full max-w-6xl space-y-8">
           <div className="text-center space-y-2">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-teal-800 border border-teal-200">
               Join Medrella Healthcare
@@ -31,7 +31,17 @@ export default async function SignupPage() {
             </p>
           </div>
 
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+            <Card className="flex flex-col justify-between border-2 border-slate-200 bg-white p-6 shadow-sm transition-all hover:border-teal-600">
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2"><Users className="size-10 text-teal-700" aria-hidden="true" /><span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">Admin approval required</span></div>
+                <h2 className="text-xl font-bold text-slate-900">STAFF</h2>
+                <p className="text-sm font-medium text-teal-700">Support your clinic’s daily patient arrivals.</p>
+                <p className="text-sm text-slate-600">Register a dedicated staff account. After admin approval and doctor assignment, manage check-ins, patient tokens and waiting queues.</p>
+                <p className="border-t border-slate-100 pt-4 text-xs text-slate-600">Your request stays pending until reviewed. Staff cannot start or complete consultations.</p>
+              </div>
+              <Link href="/signup/staff" className="mt-6 inline-flex items-center justify-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700">Register as Staff<ArrowRight className="size-4" aria-hidden="true" /></Link>
+            </Card>
             {/* Patient Card */}
             <Card className="group relative flex flex-col justify-between border-2 border-slate-200 bg-white p-6 shadow-sm transition-all hover:border-teal-600 hover:shadow-md">
               <div className="space-y-4">

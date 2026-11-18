@@ -125,13 +125,79 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
   let loseBookingResponse = false;
   let holdReply;
   let failSynthesis = false;
+  let queueStage = 'not_checked_in', queueVersion = 1;
+  let provisionedStaff = false, staffAssignment = null, createdStaff = null;
+  let pendingStaff = false;
+  const queueStartsAt = new Date().toISOString().slice(0, 10) + 'T14:00:00Z';
+  const queueEndsAt = new Date().toISOString().slice(0, 10) + 'T14:15:00Z';
+  const queueBooked = { appointmentId: fixtureId, patientName: 'Queue Fixture Patient', startsAt: queueStartsAt, endsAt: queueEndsAt };
+  const queueSummary = () => ({ appointmentId: fixtureId, status: queueStage, tokenNumber: 1,
+    currentTokenNumber: queueStage === 'in_service' ? 1 : null,
+    position: queueStage === 'waiting' ? 1 : null, checkedInAt: queueStage === 'not_checked_in' ? null : new Date().toISOString(),
+    startedAt: ['in_service', 'completed'].includes(queueStage) ? new Date().toISOString() : null,
+    serviceDate: queueStartsAt.slice(0, 10), timezone: doctorTimezone, version: queueStage === 'not_checked_in' ? null : queueVersion, queueVersion });
   const backend = createServer(async (req, res) => {
-    const fixture = /(?:^|;\s*)medrella-fixture=(patient|doctor|pending)/.exec(req.headers.cookie ?? "")?.[1];
-    const role = fixture === "doctor" ? "doctor" : "patient";
+    const fixture = /(?:^|;\s*)medrella-fixture=(patient|doctor|pending|staff|admin)/.exec(req.headers.cookie ?? "")?.[1];
+    const role = ['doctor', 'staff', 'admin'].includes(fixture) ? fixture : 'patient';
     const json = (value, status = 200) => {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(value));
     };
+    const staffAccount = { id: 'staff', name: 'Staff Fixture', email: 'staff@example.test', role: 'staff' };
+    if (req.url === '/api/staff-registration' && req.method === 'POST') {
+      for await (const chunk of req) { void chunk; }
+      pendingStaff = true; return json({ status: 'pending' }, 201);
+    }
+    if (req.url === '/api/auth/sign-in/email' && req.method === 'POST') {
+      for await (const chunk of req) { void chunk; }
+      res.setHeader('Set-Cookie', 'medrella-fixture=staff; Path=/; SameSite=Lax');
+      return json({ token: 'fixture', user: staffAccount, redirect: false });
+    }
+    if (req.url === '/api/staff-registration/me') return json({ status: pendingStaff ? 'pending' : 'approved' });
+    if (req.url === '/api/admin/staff/requests') return json(pendingStaff ? [{ ...staffAccount, requestedAt: new Date().toISOString() }] : []);
+    if (req.url === '/api/admin/staff/requests/staff/approve') {
+      for await (const chunk of req) { void chunk; }
+      pendingStaff = false; return json({ status: 'approved' });
+    }
+    if (req.url?.startsWith('/api/admin/staff/candidate?')) return json({ ...staffAccount, role: provisionedStaff ? 'staff' : 'patient', eligible: true, reason: provisionedStaff ? 'already_staff' : null });
+    if (req.url?.startsWith('/api/admin/staff?')) return json([...(provisionedStaff ? [staffAccount] : []), ...(createdStaff ? [createdStaff] : [])]);
+    if (req.url === '/api/admin/staff/accounts' && req.method === 'POST') {
+      const chunks = []; for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks));
+      createdStaff = { id: 'new-staff', name: body.name, email: body.email, role: 'staff' };
+      return json(createdStaff, 201);
+    }
+    if (req.url === '/api/admin/staff' && req.method === 'POST') {
+      for await (const chunk of req) { void chunk; }
+      provisionedStaff = true; return json(staffAccount);
+    }
+    if (req.url === '/api/admin/doctor-applications?status=approved') return json([{ userId: 'doctor', name: 'Fixture Doctor', specialty: 'Cardiology', status: 'approved' }]);
+    if (req.url === '/api/admin/staff/staff/assignments' && req.method === 'GET') return json(staffAssignment ? [staffAssignment] : []);
+    if (req.url === '/api/admin/staff/staff/assignments' || req.url === '/api/admin/staff/staff/assignments/doctor/revoke') {
+      for await (const chunk of req) { void chunk; }
+      staffAssignment = { id: fixtureId, staffId: 'staff', doctorId: 'doctor', assignedBy: 'admin', createdAt: new Date().toISOString(), revokedAt: req.url.endsWith('/revoke') ? new Date().toISOString() : null };
+      return json(staffAssignment);
+    }
+    if (req.url === '/api/queues/assignments') return json(fixture === 'staff' && (!staffAssignment || staffAssignment.revokedAt) ? [] : [{ doctorId: 'doctor', name: 'Fixture Doctor' }]);
+    if (req.url?.startsWith('/api/queues/mine?')) return json({ appointments: [queueSummary()] });
+    if (req.url?.startsWith('/api/queues?')) {
+      if (fixture === 'staff' && (!staffAssignment || staffAssignment.revokedAt)) return json({}, 403);
+      const query = new URL(req.url, 'http://fixture').searchParams;
+      return json({ doctorId: 'doctor', serviceDate: query.get('date'), timezone: doctorTimezone, version: queueVersion,
+        current: queueStage === 'in_service' ? { ...queueBooked, tokenNumber: 1, checkedInAt: new Date().toISOString(), startedAt: new Date().toISOString(), serviceDate: queueStartsAt.slice(0, 10), timezone: doctorTimezone, status: 'in_service' } : null,
+        waiting: queueStage === 'waiting' ? [{ ...queueBooked, tokenNumber: 1, position: 1, checkedInAt: new Date().toISOString(), status: 'waiting' }] : [],
+        expected: queueStage === 'not_checked_in' ? [{ ...queueBooked, tokenNumber: 1 }] : [],
+        closed: queueStage === 'completed' ? [{ ...queueBooked, status: 'completed', tokenNumber: 1, terminalAt: new Date().toISOString() }] : [],
+        waitingCount: queueStage === 'waiting' ? 1 : 0, hasMoreWaiting: false, hasMoreExpected: false, nextCursor: null });
+    }
+    if (req.url === `/api/appointments/${fixtureId}/check-in` || req.url === '/api/queues/doctor/next' || req.url === `/api/appointments/${fixtureId}/complete`) {
+      if (req.method !== (req.url.endsWith('/complete') ? 'PATCH' : 'POST')) return json({ message: 'Incorrect queue action method' }, 405);
+      for await (const chunk of req) { void chunk; }
+      queueStage = req.url.endsWith('/check-in') ? 'waiting' : req.url.endsWith('/next') ? 'in_service' : 'completed';
+      queueVersion++; return json(queueSummary());
+    }
+    if (req.url === '/api/appointments/me') return json(fixture === 'patient' ? [{ id: fixtureId, startsAt: queueStartsAt, endsAt: queueEndsAt, status: 'scheduled', holdExpiresAt: null,
+      doctor: { id: fixtureId, name: 'Dr. Fixture', specialty: 'Cardiology', bio: null }, payment: null }] : []);
     if (req.url?.startsWith('/api/appointments/availability?')) {
       const query = new URL(req.url, 'http://fixture').searchParams;
       const startsAt = new Date(`${query.get('date')}T04:30:00.000Z`);
@@ -221,7 +287,7 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
     }
   }, "the Next.js rewrite");
   const { send, evaluate } = await startBrowser(t);
-  timeoutDetails = () => evaluate(`JSON.stringify({ active:document.activeElement?.outerHTML, body:document.body.innerText.slice(-1800) })`);
+  timeoutDetails = () => evaluate(`JSON.stringify({ active:document.activeElement?.outerHTML.slice(0,600), body:document.body.innerText.slice(-1800) })`);
   await send("Page.enable");
   await send("Page.bringToFront");
   await send("Network.enable");
@@ -324,7 +390,7 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
   assert.equal(await evaluate("Array.from(document.querySelectorAll('button')).find(b => b.getAttribute('aria-label') === 'Send message').disabled"), true);
   assert.equal(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
   holdReply();
-  await until(() => hasText("Dr. Fixture"), "appointment result");
+  await until(() => evaluate(`document.querySelector('section[id$=panel]')?.innerText.includes('Here are your appointments.') && !document.querySelector('section[id$=panel] input').disabled`), "appointment result");
   assert.deepEqual(calls[0], { fixture: "patient", message: "Show my appointments" });
   await evaluate("document.querySelector('section[id$=panel] input').focus()");
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
@@ -339,7 +405,88 @@ it("renders the role-aware assistant in Chromium and submits through the Next.js
 
   await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await visit('patient', '/patient/dashboard');
+  await until(() => hasText('Your token'), 'booking token before arrival');
+  assert.equal(await hasText('Check in at reception'), true);
+  assert.equal(await hasText('Position'), false);
   await visit("doctor", "/doctor/dashboard");
+  await click('Check in Queue Fixture Patient');
+  await until(() => hasText('Checked in · 1 waiting'), 'checked-in queue patient');
+  await visit('patient', '/patient/dashboard');
+  await until(() => hasText('Checked in · Waiting'), 'patient token and waiting status');
+  assert.equal(await hasText('Position'), true);
+  await visit('doctor', '/doctor/dashboard');
+  await click('Start next patient');
+  await click('Complete consultation');
+  await click('Confirm completion');
+  await until(() => hasText('Completed and closed visits'), 'completed queue visit');
+  await visit('visitor', '/signup');
+  assert.equal(await evaluate(`Boolean(document.querySelector('a[href="/signup/staff"]'))`), true);
+  await visit('visitor', '/signup/staff');
+  for (const [name, value] of [['name', 'Staff Fixture'], ['email', 'staff@example.test'], ['password', 'Password123!'], ['confirmation', 'Password123!']]) {
+    await evaluate(`document.querySelector('input[name="${name}"]').focus()`);
+    await send('Input.insertText', { text: value });
+  }
+  await click('Request staff access');
+  await until(() => hasText('Waiting for admin approval'), 'pending staff dashboard');
+  assert.equal(await hasText('Queue Fixture Patient'), false);
+  await visit('admin', '/admin');
+  await click('Staff Access');
+  await click('Approve Staff Fixture');
+  await until(() => hasText('Staff registration approved.'), 'admin registration approval');
+  await visit('staff', '/staff/dashboard');
+  await until(() => evaluate(`document.body.textContent.includes('Clinic staff workspace')`), 'approved staff portal');
+  await visit('admin', '/admin');
+  await click('Staff Access');
+  for (const [name, value] of [['staffName', 'New Staff'], ['staffEmail', 'newstaff@example.test'], ['staffPassword', 'Password123!']]) {
+    await evaluate(`document.querySelector('input[name="${name}"]').focus()`);
+    await send('Input.insertText', { text: value });
+  }
+  await click('Create staff account');
+  await until(() => hasText('Staff account created.'), 'direct administrator staff creation');
+  assert.equal(await evaluate(`document.querySelector('input[name="staffPassword"]').value`), '');
+  await evaluate(`document.querySelector('input[type="email"]:not([name])').focus()`);
+  await send('Input.insertText', { text: 'staff@example.test' });
+  await click('Find account');
+  await until(() => hasText('Account available for staff access.'), 'eligible dedicated account');
+  await evaluate(`document.querySelector('input[type="checkbox"]').click()`);
+  await click('Enable staff access');
+  await until(() => hasText('Staff access enabled.'), 'staff provisioning');
+  await click('Assign doctor');
+  await until(() => hasText('Active assignment'), 'doctor assignment');
+  queueStage = 'not_checked_in'; queueVersion++;
+  await visit('staff', '/staff/dashboard');
+  await until(() => hasText('Queue Fixture Patient'), 'assigned staff queue');
+  assert.equal(await hasText('No queue position yet'), true);
+  await evaluate(`document.querySelector('input[type="search"]').focus()`);
+  await send('Input.insertText', { text: '#99' });
+  await until(() => hasText('No matching arrivals'), 'arrival search empty state');
+  await evaluate(`document.querySelector('input[type="search"]').select()`);
+  await send('Input.insertText', { text: '#1' });
+  await until(() => hasText('Queue Fixture Patient'), 'arrival search by booking token');
+  await click('Check in Queue Fixture Patient');
+  await until(() => hasText('Token #1 retained. Queue position 1.'), 'staff check-in receipt');
+  await click('Waiting queue');
+  await until(() => hasText('Queue Fixture Patient'), 'patient moves to waiting view');
+  assert.equal(await hasText('Position'), true);
+  await click('Closed visits');
+  await until(() => hasText('No matching closed visits'), 'closed visits empty state');
+  await click('Waiting queue');
+  assert.equal(await evaluate(`document.body.textContent.includes('Clinic staff workspace')`), true);
+  assert.equal(await evaluate(`Array.from(document.querySelectorAll('button')).some(b => /Start next patient|Complete consultation|Cancel appointment/.test(b.textContent))`), false);
+  await send('Page.navigate', { url: url + '/doctor/dashboard' });
+  await until(() => evaluate(`location.pathname === '/staff/dashboard' && document.readyState === 'complete'`), 'staff doctor-route redirect');
+  await send('Page.navigate', { url: url + '/admin' });
+  await until(() => evaluate(`location.pathname === '/staff/dashboard' && document.readyState === 'complete'`), 'staff admin-route redirect');
+  await visit('admin', '/admin');
+  await click('Staff Access');
+  await click('Revoke access');
+  await click('Confirm revocation');
+  await until(() => hasText('Doctor assignment revoked.'), 'confirmed revocation');
+  await visit('staff', '/staff/dashboard');
+  await until(() => hasText('No approved doctor queue is assigned'), 'revoked staff access');
+  assert.equal(await hasText('Queue Fixture Patient'), false);
+  await visit('doctor', '/doctor/dashboard');
   await click(launcherLabel);
   const resizeGrip = button("Resize assistant with arrow keys");
   await until(() => evaluate(`Boolean(${resizeGrip})`), "desktop resize grip");

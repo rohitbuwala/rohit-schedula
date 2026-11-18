@@ -54,6 +54,7 @@ describe('PaymentsService', () => {
   let service: PaymentsService;
   let mockRazorpay: RazorpayInstance;
   let mockNotifications: any;
+  const queueLifecycle = { bookingChanged: vi.fn().mockResolvedValue(undefined), lockPaymentDoctor: vi.fn().mockResolvedValue(undefined), canRestoreCancelledBooking: vi.fn().mockResolvedValue(true) };
 
   const sampleSecret = 'sample_test_secret_32_chars_long!!';
   const sampleWebhookSecret = 'sample_test_webhook_secret_32_c!!';
@@ -94,7 +95,7 @@ describe('PaymentsService', () => {
       createNotification: vi.fn().mockResolvedValue({ id: 'notif-1' }),
     };
 
-    service = new PaymentsService(mockRazorpay, mockNotifications);
+    service = new PaymentsService(mockRazorpay, mockNotifications, undefined, undefined, undefined, queueLifecycle as never);
   });
 
   describe('Cryptographic Signature Verification', () => {
@@ -384,6 +385,8 @@ describe('PaymentsService', () => {
       expect(result.success).toBe(true);
       expect(result.status).toBe('captured');
       expect(mockTx.update).not.toHaveBeenCalled();
+      expect(queueLifecycle.bookingChanged).not.toHaveBeenCalled();
+      expect(queueLifecycle.lockPaymentDoctor.mock.invocationCallOrder[0]).toBeLessThan(mockTx.select.mock.invocationCallOrder[0]);
     });
 
     it.each([
@@ -406,7 +409,7 @@ describe('PaymentsService', () => {
     it('successfully confirms payment, schedules appointment and emits notifications', async () => {
       const reminderScheduler = { scheduleForAppointment: vi.fn().mockResolvedValue(4) };
       const scheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
-      service = new PaymentsService(mockRazorpay, mockNotifications, undefined, scheduleService as never, reminderScheduler as never);
+      service = new PaymentsService(mockRazorpay, mockNotifications, undefined, scheduleService as never, reminderScheduler as never, queueLifecycle as never);
       const validSignature = createHmac('sha256', sampleSecret)
         .update(`${razorpayOrderId}|${razorpayPaymentId}`)
         .digest('hex');
@@ -574,7 +577,7 @@ describe('PaymentsService', () => {
       const mockEmailOutbox = { enqueue: vi.fn().mockResolvedValue(undefined) };
       const mockScheduleService = { getTimezoneForDoctor: vi.fn().mockResolvedValue('America/New_York') };
       const reminders = { scheduleForAppointment: vi.fn().mockResolvedValue(4) };
-      service = new PaymentsService(mockRazorpay, mockNotifications, mockEmailOutbox as never, mockScheduleService as never, reminders as never);
+      service = new PaymentsService(mockRazorpay, mockNotifications, mockEmailOutbox as never, mockScheduleService as never, reminders as never, queueLifecycle as never);
       const payload = {
         event: 'payment.captured',
         payload: {
@@ -699,6 +702,8 @@ describe('PaymentsService', () => {
       expect(duplicate.note).toBe('Already captured.');
       expect(mockEmailOutbox.enqueue).toHaveBeenCalledTimes(3);
       expect(reminders.scheduleForAppointment).toHaveBeenCalledTimes(1);
+      expect(queueLifecycle.bookingChanged).toHaveBeenCalledTimes(1);
+      expect(queueLifecycle.bookingChanged).toHaveBeenCalledWith(mockTx, [expect.objectContaining({ status: 'scheduled' })]);
     });
 
     it('records failure description on payment.failed event', async () => {
