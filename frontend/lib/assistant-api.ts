@@ -222,6 +222,12 @@ export async function sendAssistantMessage(message: string, signal?: AbortSignal
     signal,
   });
   if (!response.ok) {
+    if (response.status === 404) {
+      const errorBody: unknown = await response.json().catch(() => null);
+      if (z.object({ message: z.literal("Cannot POST /api/assistant/chat") }).safeParse(errorBody).success) {
+        throw new AssistantApiError("Chat is unavailable on this server. Please contact support.", 404);
+      }
+    }
     throw new AssistantApiError(messages[response.status] ?? "The assistant could not respond. Try again.", response.status);
   }
   let body: unknown;

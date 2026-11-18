@@ -8,6 +8,19 @@ const appointment = { id, ...slot, status: "scheduled" };
 const doctor = { id, name: "Dr. Test", specialty: "Cardiology" };
 const zone = { date: "2026-11-12", timezone: "Asia/Kolkata" };
 
+it("distinguishes an undeployed chat route from a missing appointment", async (t) => {
+  const mock = t.mock.method(globalThis, "fetch", async () => Response.json({
+    message: "Cannot POST /api/assistant/chat", error: "Not Found", statusCode: 404,
+  }, { status: 404 }));
+  await assert.rejects(sendAssistantMessage("hello"), {
+    status: 404, message: "Chat is unavailable on this server. Please contact support.",
+  });
+  mock.mock.mockImplementation(async () => Response.json({ message: "Appointment not found" }, { status: 404 }));
+  await assert.rejects(sendAssistantMessage("hello"), {
+    status: 404, message: "That appointment or doctor could not be found.",
+  });
+});
+
 it("sends the selected reply language and retains doctor appointment card names", async (t) => {
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     assert.deepEqual(JSON.parse(options.body), { message: 'My next appointment', language: 'hi' });
