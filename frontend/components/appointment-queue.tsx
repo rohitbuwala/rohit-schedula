@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { checkInPatient, completeQueueConsultation, markPatientAbsent, QueueApiError, readDailyQueue, readQueueAssignments, startNextPatient } from "@/lib/queue-api";
 import { attendanceLabel, consultationDuration, localQueueDate, matchesQueueSearch, queueTimeRange } from "@/lib/queue-response";
 import { useQueueResource } from "./use-appointment-queue";
+import { DoctorPatientProfile } from "./doctor-patient-profile";
 
 export function AppointmentQueue({ role = "doctor", onChanged, onTimezoneChange }: {
   role?: "doctor" | "staff"; onChanged?: () => void; onTimezoneChange?: (timezone: string) => void;
@@ -125,7 +126,7 @@ export function AppointmentQueue({ role = "doctor", onChanged, onTimezoneChange 
         {data.current ? <div className="mt-2 space-y-2"><p className="break-words text-lg font-bold text-slate-950">{data.current.patientName}</p>
           <p className="text-sm text-teal-950">Token <strong>{data.current.tokenNumber}</strong> · {queueTimeRange(data.current.startsAt, data.current.endsAt, data.current.timezone)} · {data.current.serviceDate}</p>
           <p className="text-sm text-teal-950">Started at {new Intl.DateTimeFormat("en-IN", { timeZone: data.current.timezone, hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(data.current.startedAt))} · Elapsed {consultationDuration(data.current.startedAt, clock)}</p>
-          {role === "doctor" && <div className="flex flex-wrap gap-2"><Button type="button" disabled={disabled || !!confirmation} onClick={() => setConfirmation({ kind: "complete", id: data.current!.appointmentId, name: data.current!.patientName })}><CheckCircle2 className="mr-2 size-4" aria-hidden="true" />Complete consultation</Button></div>}
+          {role === "doctor" && <><DoctorPatientProfile appointmentId={data.current.appointmentId} patientName={data.current.patientName} /><div className="flex flex-wrap gap-2"><Button type="button" disabled={disabled || !!confirmation} onClick={() => setConfirmation({ kind: "complete", id: data.current!.appointmentId, name: data.current!.patientName })}><CheckCircle2 className="mr-2 size-4" aria-hidden="true" />Complete consultation</Button></div></>}
         </div> : <div className="mt-2 flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-slate-600">No consultation is currently active.</p>
           {role === "doctor" && <Button type="button" disabled={disabled || !!confirmation || !!cursor || !data.waitingCount} onClick={() => void act("Consultation start", signal => startNextPatient(doctorId, date, data.version, signal))}>Start next patient</Button>}</div>}
       </div>
@@ -134,12 +135,14 @@ export function AppointmentQueue({ role = "doctor", onChanged, onTimezoneChange 
         <ol className="space-y-2">{visibleWaiting.map(patient => <li key={patient.appointmentId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4">
           <div className="min-w-0"><p className="break-words font-semibold text-slate-900">{patient.patientName}</p><p className="mt-1 text-xs text-slate-500">{queueTimeRange(patient.startsAt, patient.endsAt, data.timezone)}</p></div>
           <div className="flex flex-wrap items-center gap-3 text-sm"><span className="rounded-lg bg-teal-50 px-3 py-1 text-teal-950">Token <strong>{patient.tokenNumber}</strong></span><span className="text-slate-600">Position <strong>{patient.position}</strong></span></div>
+          {role === "doctor" && <DoctorPatientProfile appointmentId={patient.appointmentId} patientName={patient.patientName} />}
         </li>)}</ol>
       </div>}
       {(role === "doctor" || staffView === "arrivals") && <div><h4 className="mb-3 text-sm font-bold text-slate-900">Expected arrivals</h4>
         {!visibleExpected.length && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">{search ? "No matching arrivals on this page. Try another name or token." : "No patients awaiting check-in on this page."}</p>}
         <ul className="space-y-3">{visibleExpected.map(patient => <li key={patient.appointmentId} className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
           <div className="flex min-w-0 items-center gap-3"><span className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-teal-50 text-lg font-bold text-teal-900" aria-label={`Booking token ${patient.tokenNumber ?? "unavailable"}`}>{patient.tokenNumber ? `#${patient.tokenNumber}` : <Ticket className="size-5" aria-hidden="true" />}</span><div className="min-w-0"><p className="break-words font-semibold text-slate-900">{patient.patientName}</p><p className="mt-1 text-xs text-slate-500">{queueTimeRange(patient.startsAt, patient.endsAt, data.timezone)}</p><p className="mt-1 text-xs font-medium text-blue-700">Not checked in · No queue position yet</p></div></div>
+          {role === "doctor" && <DoctorPatientProfile appointmentId={patient.appointmentId} patientName={patient.patientName} />}
           <div className="flex flex-wrap gap-2"><Button type="button" className="min-h-11" disabled={disabled || !!confirmation || date !== today} aria-label={`Check in ${patient.patientName}`} onClick={() => void act("Patient check-in", signal => checkInPatient(patient.appointmentId, signal), result => `${patient.patientName} checked in. Token #${result.tokenNumber} retained. Queue position ${result.position ?? "updating"}.`)}>Check in</Button>
             {role === "staff" && <Button type="button" variant="outline" className="min-h-11" disabled={disabled || !!confirmation || Date.parse(patient.startsAt) > clock} aria-label={`Mark ${patient.patientName} absent`} onClick={() => setConfirmation({ kind: "absent", id: patient.appointmentId, name: patient.patientName })}>Mark absent</Button>}</div>
         </li>)}</ul>
@@ -150,6 +153,7 @@ export function AppointmentQueue({ role = "doctor", onChanged, onTimezoneChange 
           <ul className="space-y-2">{visibleClosed.map(patient => <li key={patient.appointmentId} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
             <span className="break-words font-medium">{patient.patientName}{patient.tokenNumber !== null ? ` · Token ${patient.tokenNumber}` : ""}</span>
             <span className="text-slate-600">{attendanceLabel(patient.status)}</span>
+            {role === "doctor" && patient.status === "completed" && <DoctorPatientProfile appointmentId={patient.appointmentId} patientName={patient.patientName} />}
             {patient.status === "completed" && patient.startedAt && <p className="w-full text-xs text-slate-600">Consultation: {queueTimeRange(patient.startedAt, patient.terminalAt, data.timezone)} · Duration {consultationDuration(patient.startedAt, patient.terminalAt)} ({data.timezone})</p>}
           </li>)}</ul></div>}
         <p className="text-xs text-slate-500">{queue.updatedAt ? `Updated ${new Date(queue.updatedAt).toLocaleTimeString()}` : ""} · Tokens are never renumbered</p>

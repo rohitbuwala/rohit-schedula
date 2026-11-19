@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { and, asc, count, desc, eq, gte, gt, inArray, isNotNull, lt, lte, ne, not, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
-import { appointment, appointmentIdempotency, appointmentPrescription, appointmentHistory, doctorAvailability, doctorScheduleOverride, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, doctorProfile, payment, refund, user, type AppointmentStatus } from '../db/schema.js';
+import { appointment, appointmentIdempotency, appointmentPrescription, appointmentHistory, doctorAvailability, doctorScheduleOverride, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, doctorProfile, patientProfile, payment, refund, user, type AppointmentStatus } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -1046,9 +1046,13 @@ export class AppointmentsService {
 
   async getPatientForDoctorAppointment(id: string, doctorId: string) {
     await this.assertDoctorApproved('doctor', doctorId);
-    const [patient] = await db.select({ id: user.id, name: user.name }).from(appointment)
+    const [patient] = await db.select({ id: user.id, name: user.name, dateOfBirth: patientProfile.dateOfBirth,
+      gender: patientProfile.gender, bloodGroup: patientProfile.bloodGroup, phone: patientProfile.phone,
+      address: patientProfile.address, allergies: patientProfile.allergies }).from(appointment)
       .innerJoin(user, and(eq(user.id, appointment.patientId), eq(user.role, 'patient')))
-      .where(and(eq(appointment.id, id), eq(appointment.doctorId, doctorId))).limit(1);
+      .leftJoin(patientProfile, eq(patientProfile.userId, user.id))
+      .where(and(eq(appointment.id, id), eq(appointment.doctorId, doctorId),
+        inArray(appointment.status, ['scheduled', 'completed']))).limit(1);
     if (!patient) throw new NotFoundException('Appointment not found.');
     return patient;
   }

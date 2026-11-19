@@ -22,6 +22,7 @@ import {
 } from "@/lib/appointment-response";
 import { Button } from "@/components/ui/button";
 import { AppointmentQueue } from "@/components/appointment-queue";
+import { DoctorPatientProfile } from "@/components/doctor-patient-profile";
 import { localQueueDate } from "@/lib/queue-response";
 
 function formatDate(iso: string, timezone: string): string {
@@ -520,6 +521,7 @@ function DoctorAppointmentCard({
           </div>
         )}
       </dl>
+      {(appointment.status === "scheduled" || appointment.status === "completed") && <div className="mt-4"><DoctorPatientProfile appointmentId={appointment.id} patientName={appointment.patient.name} /></div>}
 
 
     </div>

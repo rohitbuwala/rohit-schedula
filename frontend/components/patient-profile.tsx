@@ -25,6 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { MedicalInformation } from "@/components/doctor-patient-profile";
 
 const patientProfileResponseSchema = z.object({
   id: z.string(),
@@ -58,7 +59,6 @@ export function PatientProfile() {
   const [phone, setPhone] = useState("");
   const [bloodGroup, setBloodGroup] = useState("");
   const [address, setAddress] = useState("");
-  const [allergies, setAllergies] = useState("");
   const [now] = useState(() => Date.now());
 
   function populateForm(data: PatientProfileData) {
@@ -69,7 +69,6 @@ export function PatientProfile() {
     setPhone(data.phone || "");
     setBloodGroup(data.bloodGroup || "");
     setAddress(data.address || "");
-    setAllergies(data.allergies || "");
   }
 
   useEffect(() => {
@@ -121,7 +120,6 @@ export function PatientProfile() {
       phone: phone || null,
       bloodGroup: bloodGroup || null,
       address: address || null,
-      allergies: allergies || null,
     };
 
     const parsed = patientProfileFormSchema.safeParse(formData);
@@ -371,7 +369,7 @@ export function PatientProfile() {
                         {profile.allergies}
                       </div>
                     ) : (
-                      <span className="text-slate-500">No known allergies reported</span>
+                      <span className="text-slate-500">Not provided</span>
                     )}
                   </dd>
                 </div>
@@ -564,25 +562,6 @@ export function PatientProfile() {
                   </FormField>
                 </div>
 
-                {/* Allergies */}
-                <div className="sm:col-span-2">
-                  <FormField
-                    id="patient-allergies"
-                    label="Known Drug or Food Allergies (Optional)"
-                    error={fieldErrors.allergies}
-                    hint="e.g. Penicillin, Sulfa drugs, Peanuts, Latex. Helps prevent adverse reactions."
-                  >
-                    <Input
-                      id="patient-allergies"
-                      value={allergies}
-                      onChange={(e) => setAllergies(e.target.value)}
-                      maxLength={500}
-                      placeholder="List any known allergies or leave empty if none"
-                      className="text-xs h-9"
-                      aria-invalid={Boolean(fieldErrors.allergies)}
-                    />
-                  </FormField>
-                </div>
               </div>
 
               {/* Form buttons */}
@@ -609,6 +588,7 @@ export function PatientProfile() {
           </CardContent>
         </Card>
       )}
+      {profile && <MedicalInformation onSaved={allergies => setProfile(current => current ? { ...current, allergies } : current)} />}
     </div>
   );
 }
