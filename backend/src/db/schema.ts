@@ -168,6 +168,14 @@ export const appointment = pgTable('appointment', {
   check('appointment_time_order_check', sql`${table.endsAt} > ${table.startsAt}`),
 ]);
 
+export const appointmentVisit = pgTable('appointment_visit', {
+  appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
+  notes: text('notes').notNull(),
+  details: text('details').notNull(),
+  revision: integer('revision').notNull().default(1),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [check('appointment_visit_revision_check', sql`${table.revision} > 0`)]);
+
 export const appointmentPrescription = pgTable('appointment_prescription', {
   appointmentId: text('appointment_id').primaryKey().references(() => appointment.id, { onDelete: 'restrict' }),
   issuedAt: timestamp('issued_at', { withTimezone: true }).notNull().defaultNow(),
@@ -530,6 +538,7 @@ export const schema = {
   staffRegistrationRequest,
   appointment,
   appointmentPrescription,
+  appointmentVisit,
   doctorDailyQueue,
   appointmentAttendance,
   appointmentBookingToken,
