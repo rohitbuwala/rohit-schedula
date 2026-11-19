@@ -162,6 +162,13 @@
       "when": 1795075528264,
       "tag": "0022_patient_medical_history",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1795078256547,
+      "tag": "0023_appointment_visits",
+      "breakpoints": true
     }
   ]
 }
