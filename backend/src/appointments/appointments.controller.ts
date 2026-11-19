@@ -12,6 +12,7 @@ import { appointmentAvailabilityQuerySchema } from './appointment-availability.s
 import { appointmentRescheduleSchema } from './appointment-reschedule.schema.js';
 
 const idSchema = z.uuid();
+const visitInputSchema = z.object({ notes: z.string().trim().max(5000), details: z.string().trim().max(5000), revision: z.number().int().nonnegative() }).strict();
 
 @Controller('api/appointments')
 @UseGuards(AuthSessionGuard, RolesGuard)
@@ -50,6 +51,11 @@ export class AppointmentsController {
   listMine(@CurrentUser() user: AuthenticatedUser) {
     return this.appointments.listMine(user);
   }
+
+  @Get('me/visits')
+  @Roles('patient')
+  @Header('Cache-Control', 'no-store')
+  patientVisits(@CurrentUser() user: AuthenticatedUser) { return this.appointments.patientVisitHistory(user); }
 
   @Get('schedule-requests')
   @Roles('patient')
@@ -145,6 +151,35 @@ export class AppointmentsController {
     const parsed = idSchema.safeParse(id);
     if (!parsed.success) throw new BadRequestException('Invalid appointment id.');
     return this.appointments.getPatientForDoctorAppointment(parsed.data, doctor.id);
+  }
+
+  @Get(':id/patient/visits')
+  @Roles('doctor')
+  @UseGuards(DoctorApprovedGuard)
+  @Header('Cache-Control', 'no-store')
+  doctorVisits(@Param('id') id: string, @CurrentUser() doctor: AuthenticatedUser) {
+    if (!idSchema.safeParse(id).success) throw new BadRequestException('Invalid appointment id.');
+    return this.appointments.doctorPatientVisits(id, doctor);
+  }
+
+  @Get(':id/visit')
+  @Roles('doctor')
+  @UseGuards(DoctorApprovedGuard)
+  @Header('Cache-Control', 'no-store')
+  doctorVisit(@Param('id') id: string, @CurrentUser() doctor: AuthenticatedUser) {
+    if (!idSchema.safeParse(id).success) throw new BadRequestException('Invalid appointment id.');
+    return this.appointments.getDoctorVisit(id, doctor);
+  }
+
+  @Patch(':id/visit')
+  @Roles('doctor')
+  @UseGuards(DoctorApprovedGuard)
+  @Header('Cache-Control', 'no-store')
+  updateVisit(@Param('id') id: string, @CurrentUser() doctor: AuthenticatedUser, @Body() body: unknown) {
+    if (!idSchema.safeParse(id).success) throw new BadRequestException('Invalid appointment id.');
+    const parsed = visitInputSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
+    return this.appointments.updateDoctorVisit(id, doctor, parsed.data);
   }
 
   @Get(':id')

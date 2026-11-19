@@ -30,6 +30,7 @@ import { useOwnAttendance } from "@/components/use-appointment-queue";
 import { AppointmentCheckInStatus } from "@/components/appointment-check-in-status";
 import { isUpcomingVisit, visitStatus } from "@/lib/queue-response";
 import { PatientAppointments } from "@/components/patient-appointments";
+import { VisitHistory } from "@/components/visit-history";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface PatientOverviewProps {
@@ -537,6 +538,7 @@ export function PatientOverview({ name, assistant }: PatientOverviewProps) {
         </Card>
       )}
 
+      <VisitHistory />
       {/* Complete Appointment History & Management Section */}
       <div id="appointment-history-section" className="pt-2">
         <PatientAppointments

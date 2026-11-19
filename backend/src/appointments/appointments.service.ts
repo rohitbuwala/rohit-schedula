@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { and, asc, count, desc, eq, gte, gt, inArray, isNotNull, lt, lte, ne, not, or, sql } from 'drizzle-orm';
 import type { AuthenticatedUser, UserRole } from '../auth/authenticated-user.js';
 import { db } from '../db/database.js';
-import { appointment, appointmentIdempotency, appointmentPrescription, appointmentHistory, doctorAvailability, doctorScheduleOverride, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, doctorProfile, patientProfile, payment, refund, user, type AppointmentStatus } from '../db/schema.js';
+import { appointment, appointmentAttendance, appointmentVisit, appointmentIdempotency, appointmentPrescription, appointmentHistory, doctorAvailability, doctorScheduleOverride, scheduleChangeAlternative, scheduleChangeAppointment, scheduleChangeRequest, doctorProfile, patientProfile, payment, refund, user, type AppointmentStatus } from '../db/schema.js';
 import { DoctorProfilesService } from '../doctors/doctor-profiles.service.js';
 import { DoctorScheduleService } from '../doctors/doctor-schedule.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -1055,6 +1055,62 @@ export class AppointmentsService {
         inArray(appointment.status, ['scheduled', 'completed']))).limit(1);
     if (!patient) throw new NotFoundException('Appointment not found.');
     return patient;
+  }
+
+  private async requireDoctorVisitAppointment(id: string, actor: AuthenticatedUser) {
+    if (actor.role !== 'doctor') throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    const [record] = await db.select({ patientId: appointment.patientId }).from(appointment)
+      .where(and(eq(appointment.id, id), eq(appointment.doctorId, actor.id), inArray(appointment.status, ['scheduled', 'completed']))).limit(1);
+    if (!record) throw new NotFoundException('Appointment not found.');
+    return record;
+  }
+
+  private async listPatientVisits(patientId: string) {
+    return db.select({ id: appointment.id, startsAt: appointment.startsAt, status: appointment.status,
+      attendanceStatus: appointmentAttendance.status, doctorName: user.name, specialty: doctorProfile.specialty,
+      notes: appointmentVisit.notes, details: appointmentVisit.details })
+      .from(appointment).innerJoin(user, eq(user.id, appointment.doctorId))
+      .leftJoin(doctorProfile, eq(doctorProfile.userId, appointment.doctorId))
+      .leftJoin(appointmentAttendance, eq(appointmentAttendance.appointmentId, appointment.id))
+      .leftJoin(appointmentVisit, eq(appointmentVisit.appointmentId, appointment.id))
+      .where(and(eq(appointment.patientId, patientId), lte(appointment.startsAt, new Date()), ne(appointment.status, 'pending_payment')))
+      .orderBy(desc(appointment.startsAt), desc(appointment.id));
+  }
+
+  async patientVisitHistory(actor: AuthenticatedUser) {
+    if (actor.role !== 'patient') throw new ForbiddenException();
+    return this.listPatientVisits(actor.id);
+  }
+
+  async doctorPatientVisits(id: string, actor: AuthenticatedUser) {
+    const record = await this.requireDoctorVisitAppointment(id, actor);
+    return this.listPatientVisits(record.patientId);
+  }
+
+  async getDoctorVisit(id: string, actor: AuthenticatedUser) {
+    await this.requireDoctorVisitAppointment(id, actor);
+    const [visit] = await db.select({ notes: appointmentVisit.notes, details: appointmentVisit.details, revision: appointmentVisit.revision })
+      .from(appointmentVisit).where(eq(appointmentVisit.appointmentId, id)).limit(1);
+    return visit ?? { notes: '', details: '', revision: 0 };
+  }
+
+  async updateDoctorVisit(id: string, actor: AuthenticatedUser, input: { notes: string; details: string; revision: number }) {
+    if (actor.role !== 'doctor') throw new ForbiddenException();
+    await this.assertDoctorApproved(actor.role, actor.id);
+    return db.transaction(async tx => {
+      const [record] = await tx.select({ id: appointment.id }).from(appointment)
+        .innerJoin(doctorProfile, and(eq(doctorProfile.userId, actor.id), eq(doctorProfile.status, 'approved')))
+        .where(and(eq(appointment.id, id), eq(appointment.doctorId, actor.id), inArray(appointment.status, ['scheduled', 'completed'])))
+        .for('update').limit(1);
+      if (!record) throw new NotFoundException('Appointment not found.');
+      const [current] = await tx.select().from(appointmentVisit).where(eq(appointmentVisit.appointmentId, id)).for('update').limit(1);
+      if ((current?.revision ?? 0) !== input.revision) throw new ConflictException('Visit details changed. Reload before saving.');
+      const values = { notes: input.notes, details: input.details, revision: input.revision + 1, updatedAt: new Date() };
+      if (current) await tx.update(appointmentVisit).set(values).where(eq(appointmentVisit.appointmentId, id));
+      else await tx.insert(appointmentVisit).values({ appointmentId: id, ...values });
+      return { notes: values.notes, details: values.details, revision: values.revision };
+    });
   }
 
   async reschedule(id: string, actor: AuthenticatedUser, input: AppointmentRescheduleInput, expectedStartsAt?: Date) {
