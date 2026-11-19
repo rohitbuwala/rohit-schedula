@@ -254,10 +254,25 @@ export const patientProfile = pgTable('patient_profile', {
   bloodGroup: text('blood_group'),
   address: text('address'),
   allergies: text('allergies'),
+  medicalConditions: text('medical_conditions'),
+  medicalRevision: integer('medical_revision').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index('patient_profile_user_idx').on(table.userId),
+]);
+
+export const patientMedicalHistory = pgTable('patient_medical_history', {
+  id: text('id').primaryKey(),
+  patientId: text('patient_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  actorId: text('actor_id').notNull().references(() => user.id, { onDelete: 'restrict' }),
+  actorRole: text('actor_role').notNull(),
+  appointmentId: text('appointment_id').references(() => appointment.id, { onDelete: 'restrict' }),
+  changes: jsonb('changes').$type<Record<string, { before: string | null; after: string | null }>>().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('patient_medical_history_patient_created_idx').on(table.patientId, table.createdAt, table.id),
+  check('patient_medical_history_actor_role_check', sql`${table.actorRole} in ('patient', 'doctor')`),
 ]);
 
 export const doctorAvailability = pgTable('doctor_availability', {

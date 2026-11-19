@@ -155,6 +155,13 @@
       "when": 1794900901641,
       "tag": "0021_booking_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1795075528264,
+      "tag": "0022_patient_medical_history",
+      "breakpoints": true
     }
   ]
 }

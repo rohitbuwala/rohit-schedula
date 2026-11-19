@@ -140,6 +140,7 @@ export class AppointmentsController {
   @Get(':id/patient')
   @Roles('doctor')
   @UseGuards(DoctorApprovedGuard)
+  @Header('Cache-Control', 'no-store')
   getPatient(@Param('id') id: string, @CurrentUser() doctor: AuthenticatedUser) {
     const parsed = idSchema.safeParse(id);
     if (!parsed.success) throw new BadRequestException('Invalid appointment id.');
